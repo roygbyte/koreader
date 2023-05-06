@@ -43,6 +43,7 @@ local order = {
     },
     device = {
         "keyboard_layout",
+        "external_keyboard",
         "font_ui_fallbacks",
         "----------------------------",
         "time",
@@ -66,7 +67,6 @@ local order = {
         "backspace_as_back",
         "----------------------------",
         "android_volume_keys",
-        "android_camera_key",
         "android_haptic_feedback",
         "android_back_button",
         "----------------------------",
@@ -168,6 +168,8 @@ local order = {
     },
     help = {
         "quickstart_guide",
+        "----------------------------",
+        "search_menu",
         "----------------------------",
         "report_bug",
         "----------------------------",

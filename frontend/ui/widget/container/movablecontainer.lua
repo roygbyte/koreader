@@ -23,7 +23,7 @@ local UIManager = require("ui/uimanager")
 local Screen = Device.screen
 local logger = require("logger")
 
-local MovableContainer = InputContainer:new{
+local MovableContainer = InputContainer:extend{
     -- Alpha value for subwidget transparency
     -- 0 = fully invisible, 1 = fully opaque (0.6 / 0.7 / 0.8 are some interesting values)
     alpha = nil,
@@ -74,14 +74,15 @@ function MovableContainer:init()
         -- which is somehow nice and gives a kind of magnetic move that
         -- stick the widget to some invisible rulers.
         -- (Touch is needed for accurate pan)
-        self.ges_events = {}
-        self.ges_events.MovableTouch = not ignore.touch and { GestureRange:new{ ges = "touch", range = range } } or nil
-        self.ges_events.MovableSwipe = not ignore.swipe and { GestureRange:new{ ges = "swipe", range = range } } or nil
-        self.ges_events.MovableHold = not ignore.hold and { GestureRange:new{ ges = "hold", range = range } } or nil
-        self.ges_events.MovableHoldPan = not ignore.hold_pan and { GestureRange:new{ ges = "hold_pan", range = range } } or nil
-        self.ges_events.MovableHoldRelease = not ignore.hold_release and { GestureRange:new{ ges = "hold_release", range = range } } or nil
-        self.ges_events.MovablePan = not ignore.pan and { GestureRange:new{ ges = "pan", range = range } } or nil
-        self.ges_events.MovablePanRelease = not ignore.pan_release and { GestureRange:new{ ges = "pan_release", range = range } } or nil
+        self.ges_events = {
+            MovableTouch       = not ignore.touch        and { GestureRange:new{ ges = "touch", range = range } } or nil,
+            MovableSwipe       = not ignore.swipe        and { GestureRange:new{ ges = "swipe", range = range } } or nil,
+            MovableHold        = not ignore.hold         and { GestureRange:new{ ges = "hold", range = range } } or nil,
+            MovableHoldPan     = not ignore.hold_pan     and { GestureRange:new{ ges = "hold_pan", range = range } } or nil,
+            MovableHoldRelease = not ignore.hold_release and { GestureRange:new{ ges = "hold_release", range = range } } or nil,
+            MovablePan         = not ignore.pan          and { GestureRange:new{ ges = "pan", range = range } } or nil,
+            MovablePanRelease  = not ignore.pan_release  and { GestureRange:new{ ges = "pan_release", range = range } } or nil,
+        }
     end
 end
 
@@ -106,7 +107,7 @@ function MovableContainer:paintTo(bb, x, y)
 
     local content_size = self[1]:getSize()
     if not self.dimen then
-        self.dimen = Geom:new{w = content_size.w, h = content_size.h}
+        self.dimen = Geom:new{x = 0, y = 0, w = content_size.w, h = content_size.h}
     end
 
     self._orig_x = x

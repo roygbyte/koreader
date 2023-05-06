@@ -39,11 +39,12 @@ local _ = require("gettext")
 local Input = Device.input
 local Screen = Device.screen
 
-local ConfirmBox = InputContainer:new{
+local ConfirmBox = InputContainer:extend{
     modal = true,
     keep_dialog_open = false,
     text = _("no text"),
     face = Font:getFace("infofont"),
+    icon = "notice-question",
     ok_text = _("OK"),
     cancel_text = _("Cancel"),
     ok_callback = function() end,
@@ -72,7 +73,7 @@ function ConfirmBox:init()
             }
         end
         if Device:hasKeys() then
-            self.key_events.Close = { {Device.input.group.Back}, doc = "cancel" }
+            self.key_events.Close = { { Device.input.group.Back } }
         end
     end
     local text_widget = TextBoxWidget:new{
@@ -83,7 +84,8 @@ function ConfirmBox:init()
     local content = HorizontalGroup:new{
         align = "center",
         IconWidget:new{
-            icon = "notice-question",
+            icon = self.icon,
+            alpha = true,
         },
         HorizontalSpan:new{ width = Size.span.horizontal_default },
         text_widget,

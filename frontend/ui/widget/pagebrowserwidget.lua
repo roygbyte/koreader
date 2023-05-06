@@ -28,7 +28,7 @@ local BookMapWidget = require("ui/widget/bookmapwidget")
 local BookMapRow = BookMapWidget.BookMapRow
 
 -- PageBrowserWidget: shows thumbnails of pages
-local PageBrowserWidget = InputContainer:new{
+local PageBrowserWidget = InputContainer:extend{
     title = _("Page browser"),
     -- Focus page: will be put at the best place in the thumbnail grid
     -- (that is, the grid will pick thumbnails from pages before and
@@ -52,49 +52,51 @@ function PageBrowserWidget:init()
 
     if Device:hasKeys() then
         self.key_events = {
-            Close = { {Device.input.group.Back}, doc = "close page" },
-            ScrollRowUp = {{"Up"}, doc = "scroll up"},
-            ScrollRowDown = {{"Down"}, doc = "scrol down"},
-            ScrollPageUp = {{Input.group.PgBack}, doc = "prev page"},
-            ScrollPageDown = {{Input.group.PgFwd}, doc = "next page"},
+            Close = { { Device.input.group.Back } },
+            ScrollRowUp = { { "Up" } },
+            ScrollRowDown = { { "Down" } },
+            ScrollPageUp = { { Input.group.PgBack } },
+            ScrollPageDown = { { Input.group.PgFwd } },
         }
     end
     if Device:isTouchDevice() then
-        self.ges_events.Swipe = {
-            GestureRange:new{
-                ges = "swipe",
-                range = self.dimen,
-            }
-        }
-        self.ges_events.MultiSwipe = {
-            GestureRange:new{
-                ges = "multiswipe",
-                range = self.dimen,
-            }
-        }
-        self.ges_events.Tap = {
-            GestureRange:new{
-                ges = "tap",
-                range = self.dimen,
-            }
-        }
-        self.ges_events.Hold = {
-            GestureRange:new{
-                ges = "hold",
-                range = self.dimen,
-            }
-        }
-        self.ges_events.Pinch = {
-            GestureRange:new{
-                ges = "pinch",
-                range = self.dimen,
-            }
-        }
-        self.ges_events.Spread = {
-            GestureRange:new{
-                ges = "spread",
-                range = self.dimen,
-            }
+        self.ges_events = {
+            Swipe = {
+                GestureRange:new{
+                    ges = "swipe",
+                    range = self.dimen,
+                }
+            },
+            MultiSwipe = {
+                GestureRange:new{
+                    ges = "multiswipe",
+                    range = self.dimen,
+                }
+            },
+            Tap = {
+                GestureRange:new{
+                    ges = "tap",
+                    range = self.dimen,
+                }
+            },
+            Hold = {
+                GestureRange:new{
+                    ges = "hold",
+                    range = self.dimen,
+                }
+            },
+            Pinch = {
+                GestureRange:new{
+                    ges = "pinch",
+                    range = self.dimen,
+                }
+            },
+            Spread = {
+                GestureRange:new{
+                    ges = "spread",
+                    range = self.dimen,
+                }
+            },
         }
     end
 

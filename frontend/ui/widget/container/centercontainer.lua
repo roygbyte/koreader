@@ -4,7 +4,7 @@ CenterContainer centers its content (1 widget) within its own dimensions
 
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 
-local CenterContainer = WidgetContainer:new()
+local CenterContainer = WidgetContainer:extend{}
 
 function CenterContainer:paintTo(bb, x, y)
     local content_size = self[1]:getSize()
@@ -14,8 +14,7 @@ function CenterContainer:paintTo(bb, x, y)
         if self.dimen.h < content_size.h then
             self.ignore = "height"
         end
-    end
-    if self.ignore_if_over == "width" then -- align left borders
+    elseif self.ignore_if_over == "width" then -- align left borders
         if self.dimen.w < content_size.w then
             self.ignore = "width"
         end

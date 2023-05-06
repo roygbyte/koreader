@@ -1,3 +1,44 @@
+--[[--
+A button dialog widget that shows a grid of buttons.
+
+    @usage
+    local button_dialog = ButtonDialog:new{
+        buttons = {
+            {
+                {
+                    text = "First row, left side",
+                    callback = function() end,
+                    hold_callback = function() end
+                },
+                {
+                    text = "First row, middle",
+                    callback = function() end
+                },
+                {
+                    text = "First row, right side",
+                    callback = function() end
+                }
+            },
+            {
+                {
+                    text = "Second row, full span",
+                    callback = function() end
+                }
+            },
+            {
+                {
+                    text = "Third row, left side",
+                    callback = function() end
+                },
+                {
+                    text = "Third row, right side",
+                    callback = function() end
+                }
+            }
+        }
+    }
+--]]
+
 local Blitbuffer = require("ffi/blitbuffer")
 local ButtonTable = require("ui/widget/buttontable")
 local CenterContainer = require("ui/widget/container/centercontainer")
@@ -12,7 +53,7 @@ local UIManager = require("ui/uimanager")
 local _ = require("gettext")
 local Screen = require("device").screen
 
-local ButtonDialog = InputContainer:new{
+local ButtonDialog = InputContainer:extend{
     buttons = nil,
     tap_close_callback = nil,
     alpha = nil, -- passed to MovableContainer
@@ -21,9 +62,7 @@ local ButtonDialog = InputContainer:new{
 function ButtonDialog:init()
     if Device:hasKeys() then
         local close_keys = Device:hasFewKeys() and { "Back", "Left" } or Device.input.group.Back
-        self.key_events = {
-            Close = { { close_keys }, doc = "close button dialog" }
-        }
+        self.key_events.Close = { { close_keys } }
     end
     if Device:isTouchDevice() then
         self.ges_events.TapClose = {

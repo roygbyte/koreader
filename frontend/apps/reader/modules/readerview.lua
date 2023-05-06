@@ -28,28 +28,13 @@ local T = require("ffi/util").template
 
 local ReaderView = OverlapGroup:extend{
     document = nil,
+    view_modules = nil, -- array
 
     -- single page state
-    state = {
-        page = nil,
-        pos = 0,
-        zoom = 1.0,
-        rotation = 0,
-        gamma = 1.0,
-        offset = nil,
-        bbox = nil,
-    },
-    outer_page_color = Blitbuffer.gray(DOUTER_PAGE_COLOR / 15),
+    state = nil, -- table
+    outer_page_color = Blitbuffer.gray(G_defaults:readSetting("DOUTER_PAGE_COLOR") * (1/15)),
     -- highlight with "lighten" or "underscore" or "strikeout" or "invert"
-    highlight = {
-        lighten_factor = G_reader_settings:readSetting("highlight_lighten_factor", 0.2),
-        note_mark = G_reader_settings:readSetting("highlight_note_marker"),
-        temp_drawer = "invert",
-        temp = {},
-        saved_drawer = "lighten",
-        saved = {},
-        indicator = nil, -- geom: non-touch highlight position indicator: {x = 50, y=50}
-    },
+    highlight = nil, -- table
     highlight_visible = true,
     note_mark_line_w = 3, -- side line thickness
     note_mark_sign = nil,
@@ -57,17 +42,14 @@ local ReaderView = OverlapGroup:extend{
     note_mark_pos_x2 = nil, -- page 2 in two-page mode
     -- PDF/DjVu continuous paging
     page_scroll = nil,
-    page_bgcolor = Blitbuffer.gray(DBACKGROUND_COLOR / 15),
-    page_states = {},
+    page_bgcolor = Blitbuffer.gray(G_defaults:readSetting("DBACKGROUND_COLOR") * (1/15)),
+    page_states = nil, -- table
     -- properties of the gap drawn between each page in scroll mode:
-    page_gap = {
-        -- color (0 = white, 8 = gray, 15 = black)
-        color = Blitbuffer.gray((G_reader_settings:readSetting("page_gap_color") or 8) / 15),
-    },
+    page_gap = nil, -- table
     -- DjVu page rendering mode (used in djvu.c:drawPage())
-    render_mode = DRENDER_MODE, -- default to COLOR
+    render_mode = G_defaults:readSetting("DRENDER_MODE"), -- default to COLOR
     -- Crengine view mode
-    view_mode = DCREREADER_VIEW_MODE, -- default to page mode
+    view_mode = G_defaults:readSetting("DCREREADER_VIEW_MODE"), -- default to page mode
     hinting = true,
 
     -- visible area within current viewing page
@@ -91,10 +73,30 @@ local ReaderView = OverlapGroup:extend{
 
 function ReaderView:init()
     self.view_modules = {}
-    -- fix recalculate from close document pageno
-    self.state.page = nil
 
-    -- Reset the various areas across documents
+    self.state = {
+        page = nil,
+        pos = 0,
+        zoom = 1.0,
+        rotation = 0,
+        gamma = 1.0,
+        offset = nil,
+        bbox = nil,
+    }
+    self.highlight = {
+        lighten_factor = G_reader_settings:readSetting("highlight_lighten_factor", 0.2),
+        note_mark = G_reader_settings:readSetting("highlight_note_marker"),
+        temp_drawer = "invert",
+        temp = {},
+        saved_drawer = "lighten",
+        saved = {},
+        indicator = nil, -- geom: non-touch highlight position indicator: {x = 50, y=50}
+    }
+    self.page_states = {}
+    self.page_gap = {
+        -- color (0 = white, 8 = gray, 15 = black)
+        color = Blitbuffer.gray((G_reader_settings:readSetting("page_gap_color") or 8) * (1/15)),
+    }
     self.visible_area = Geom:new{x = 0, y = 0, w = 0, h = 0}
     self.page_area = Geom:new{x = 0, y = 0, w = 0, h = 0}
     self.dim_area = Geom:new{x = 0, y = 0, w = 0, h = 0}
@@ -103,6 +105,9 @@ function ReaderView:init()
     self.emitHintPageEvent = function()
         self.ui:handleEvent(Event:new("HintPage", self.hinting))
     end
+
+    -- We've subclassed OverlapGroup, go through its init, because it does some funky stuff with self.dimen...
+    OverlapGroup.init(self)
 end
 
 function ReaderView:addWidgets()
@@ -220,8 +225,8 @@ function ReaderView:paintTo(bb, x, y)
     if self.footer_visible then
         self.footer:paintTo(bb, x, y)
     end
-    -- paint flipping
-    if self.flipping_visible then
+    -- paint flipping or select mode sign
+    if self.flipping_visible or self.ui.highlight.select_mode then
         self.flipping:paintTo(bb, x, y)
     end
     for _, m in pairs(self.view_modules) do
@@ -501,32 +506,53 @@ function ReaderView:drawSavedHighlight(bb, x, y)
     end
 end
 
+-- Returns the list of highlights in page.
+-- The list includes full single-page highlights and parts of multi-page highlights.
+function ReaderView:getPageSavedHighlights(page)
+    local highlights = {}
+    local is_reflow = self.document.configurable.text_wrap
+    self.document.configurable.text_wrap = 0
+    for page_num, page_highlights in pairs(self.highlight.saved) do
+        for i, highlight in ipairs(page_highlights) do
+            -- old single-page reflow highlights do not have page in position
+            local pos0_page = highlight.pos0.page or page_num
+            local pos1_page = highlight.pos1.page or page_num
+            if pos0_page <= page and page <= pos1_page then
+                if pos0_page == pos1_page then -- single-page highlight
+                    table.insert(highlights, highlight)
+                else -- multi-page highlight
+                    local item = self.ui.highlight:getSavedExtendedHighlightPage(highlight, page, i)
+                    table.insert(highlights, item)
+                end
+            end
+        end
+    end
+    self.document.configurable.text_wrap = is_reflow
+    return highlights
+end
+
 function ReaderView:drawPageSavedHighlight(bb, x, y)
     local pages = self:getCurrentPageList()
-    for _, page in pairs(pages) do
-        local items = self.highlight.saved[page]
-        if items then
-            for i = 1, #items do
-                local item = items[i]
-                local pos0, pos1 = item.pos0, item.pos1
-                local boxes = self.document:getPageBoxesFromPositions(page, pos0, pos1)
-                if boxes then
-                    local drawer = item.drawer or self.highlight.saved_drawer
-                    local draw_note_mark = self.highlight.note_mark and
-                        self.ui.bookmark:getBookmarkNote({ page = page, datetime = item.datetime, })
-                    for _, box in pairs(boxes) do
-                        local rect = self:pageToScreenTransform(page, box)
-                        if rect then
-                            self:drawHighlightRect(bb, x, y, rect, drawer, draw_note_mark)
-                            if draw_note_mark and self.highlight.note_mark == "sidemark" then
-                                draw_note_mark = false -- side mark in the first line only
-                            end
+    for _, page in ipairs(pages) do
+        local items = self:getPageSavedHighlights(page)
+        for _, item in ipairs(items) do
+            local boxes = self.document:getPageBoxesFromPositions(page, item.pos0, item.pos1)
+            if boxes then
+                local drawer = item.drawer or self.highlight.saved_drawer
+                local draw_note_mark = self.highlight.note_mark and
+                    self.ui.bookmark:getBookmarkNote({datetime = item.datetime})
+                for _, box in ipairs(boxes) do
+                    local rect = self:pageToScreenTransform(page, box)
+                    if rect then
+                        self:drawHighlightRect(bb, x, y, rect, drawer, draw_note_mark)
+                        if draw_note_mark and self.highlight.note_mark == "sidemark" then
+                            draw_note_mark = false -- side mark in the first line only
                         end
-                    end -- end for each box
-                end -- end if boxes
-            end -- end for each highlight
+                    end
+                end
+            end
         end
-    end -- end for each page
+    end
 end
 
 function ReaderView:drawXPointerSavedHighlight(bb, x, y)
@@ -562,11 +588,13 @@ function ReaderView:drawXPointerSavedHighlight(bb, x, y)
                     if boxes then
                         local drawer = item.drawer or self.highlight.saved_drawer
                         local draw_note_mark = self.highlight.note_mark and
-                            self.ui.bookmark:getBookmarkNote({ page = item.pos0, datetime = item.datetime, })
-                        for _, box in pairs(boxes) do
-                            self:drawHighlightRect(bb, x, y, box, drawer, draw_note_mark)
-                            if draw_note_mark and self.highlight.note_mark == "sidemark" then
-                                draw_note_mark = false -- side mark in the first line only
+                            self.ui.bookmark:getBookmarkNote({datetime = item.datetime})
+                        for _, box in ipairs(boxes) do
+                            if box.h ~= 0 then
+                                self:drawHighlightRect(bb, x, y, box, drawer, draw_note_mark)
+                                if draw_note_mark and self.highlight.note_mark == "sidemark" then
+                                    draw_note_mark = false -- side mark in the first line only
+                                end
                             end
                         end -- end for each box
                     end -- end if boxes
@@ -831,9 +859,9 @@ function ReaderView:onReadSettings(config)
         else
             -- No doc specific rotation, pickup global defaults for the doc type
             if self.ui.paging then
-                rotation_mode = G_reader_settings:readSetting("kopt_rotation_mode") or Screen.ORIENTATION_PORTRAIT
+                rotation_mode = G_reader_settings:readSetting("kopt_rotation_mode") or Screen.DEVICE_ROTATED_UPRIGHT
             else
-                rotation_mode = G_reader_settings:readSetting("copt_rotation_mode") or Screen.ORIENTATION_PORTRAIT
+                rotation_mode = G_reader_settings:readSetting("copt_rotation_mode") or Screen.DEVICE_ROTATED_UPRIGHT
             end
         end
     end
@@ -883,7 +911,7 @@ function ReaderView:onReadSettings(config)
         end
     end
     self.inverse_reading_order = config:isTrue("inverse_reading_order") or G_reader_settings:isTrue("inverse_reading_order")
-    self.page_overlap_enable = config:isTrue("show_overlap_enable") or G_reader_settings:isTrue("page_overlap_enable") or DSHOWOVERLAP
+    self.page_overlap_enable = config:isTrue("show_overlap_enable") or G_reader_settings:isTrue("page_overlap_enable") or G_defaults:readSetting("DSHOWOVERLAP")
     self.page_overlap_style = config:readSetting("page_overlap_style") or G_reader_settings:readSetting("page_overlap_style") or "dim"
     self.page_gap.height = Screen:scaleBySize(config:readSetting("kopt_page_gap_height")
                                               or G_reader_settings:readSetting("kopt_page_gap_height")
@@ -1071,8 +1099,7 @@ function ReaderView:getRenderModeMenuTable()
 end
 
 function ReaderView:onCloseDocument()
-    self.hinting = false
-    -- stop any in fly HintPage event
+    -- stop any pending HintPage event
     UIManager:unschedule(self.emitHintPageEvent)
 end
 
@@ -1141,20 +1168,22 @@ function ReaderView:getTapZones()
     local forward_zone, backward_zone
     local tap_zones_type = G_reader_settings:readSetting("page_turns_tap_zones", "default")
     if tap_zones_type == "default" then
+        local DTAP_ZONE_FORWARD = G_defaults:readSetting("DTAP_ZONE_FORWARD")
         forward_zone = {
             ratio_x = DTAP_ZONE_FORWARD.x, ratio_y = DTAP_ZONE_FORWARD.y,
             ratio_w = DTAP_ZONE_FORWARD.w, ratio_h = DTAP_ZONE_FORWARD.h,
         }
+        local DTAP_ZONE_BACKWARD = G_defaults:readSetting("DTAP_ZONE_BACKWARD")
         backward_zone = {
             ratio_x = DTAP_ZONE_BACKWARD.x, ratio_y = DTAP_ZONE_BACKWARD.y,
             ratio_w = DTAP_ZONE_BACKWARD.w, ratio_h = DTAP_ZONE_BACKWARD.h,
         }
     else -- user defined page turns tap zones
-        local tap_zone_forward_w = G_reader_settings:readSetting("page_turns_tap_zone_forward_size_ratio", DTAP_ZONE_FORWARD.w)
-        local tap_zone_backward_w = 1 - tap_zone_forward_w
+        local tap_zone_forward_w = G_reader_settings:readSetting("page_turns_tap_zone_forward_size_ratio", G_defaults:readSetting("DTAP_ZONE_FORWARD").w)
+        local tap_zone_backward_w = G_reader_settings:readSetting("page_turns_tap_zone_backward_size_ratio", G_defaults:readSetting("DTAP_ZONE_BACKWARD").w)
         if tap_zones_type == "left_right" then
             forward_zone = {
-                ratio_x = tap_zone_backward_w, ratio_y = 0,
+                ratio_x = 1 - tap_zone_forward_w, ratio_y = 0,
                 ratio_w = tap_zone_forward_w, ratio_h = 1,
             }
             backward_zone = {
@@ -1163,7 +1192,7 @@ function ReaderView:getTapZones()
             }
         else
             forward_zone = {
-                ratio_x = 0, ratio_y = tap_zone_backward_w,
+                ratio_x = 0, ratio_y = 1 - tap_zone_forward_w,
                 ratio_w = 1, ratio_h = tap_zone_forward_w,
             }
             backward_zone = {

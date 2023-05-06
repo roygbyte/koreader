@@ -23,7 +23,7 @@ local _ = require("gettext")
 local Device = require("device")
 local Screen = Device.screen
 
-local KeyboardLayoutDialog = FocusManager:new{
+local KeyboardLayoutDialog = FocusManager:extend{
     is_always_active = true,
     modal = true,
     stop_events_propagation = true,
@@ -165,11 +165,10 @@ function KeyboardLayoutDialog:init()
             w = Screen:getWidth(),
             h = Screen:getHeight(),
         },
-        ignore_if_over = "height",
         self.movable,
     }
     if Device:hasKeys() then
-        self.key_events.CloseDialog = { {Device.input.group.Back}, doc = "close dialog" }
+        self.key_events.CloseDialog = { { Device.input.group.Back } }
     end
 end
 

@@ -8,15 +8,14 @@ local InputContainer = require("ui/widget/container/inputcontainer")
 local SpinWidget = require("ui/widget/spinwidget")
 local UIManager = require("ui/uimanager")
 local logger = require("logger")
-local util = require("util")
 local _ = require("gettext")
 local Input = Device.input
 local Screen = Device.screen
 local T = require("ffi/util").template
 
-local ReaderZooming = InputContainer:new{
+local ReaderZooming = InputContainer:extend{
     zoom = 1.0,
-    available_zoom_modes = {
+    available_zoom_modes = { -- const
         "page",
         "pagewidth",
         "pageheight",
@@ -27,26 +26,37 @@ local ReaderZooming = InputContainer:new{
         "rows",
         "manual",
     },
-    zoom_genus_to_mode = {
+    zoom_mode_label = { -- const
+        page          = _("page") .. " - " .. _("full"),
+        pagewidth     = _("page") .. " - " .. _("width"),
+        pageheight    = _("page") .. " - " .. _("height"),
+        content       = _("content") .. " - " .. _("full"),
+        contentwidth  = _("content") .. " - " .. _("width"),
+        contentheight = _("content") .. " - " .. _("height"),
+        columns       = _("columns"),
+        rows          = _("rows"),
+        manual        = _("manual"),
+    },
+    zoom_genus_to_mode = { -- const
         [4] = "page",
         [3] = "content",
         [2] = "columns",
         [1] = "rows",
         [0] = "manual",
     },
-    zoom_mode_to_genus = {
+    zoom_mode_to_genus = { -- const
         page    = 4,
         content = 3,
         columns = 2,
         rows    = 1,
         manual  = 0,
     },
-    zoom_type_to_mode = {
+    zoom_type_to_mode = { -- const
         [2] = "",
         [1] = "width",
         [0] = "height",
     },
-    zoom_mode_to_type = {
+    zoom_mode_to_type = { -- const
         [""]   = 2,
         width  = 1,
         height = 0,
@@ -58,7 +68,7 @@ local ReaderZooming = InputContainer:new{
     -- with overlap of zoom_overlap_h % (horizontally)
     -- and zoom_overlap_v % (vertically).
     kopt_zoom_factor = 1.5,
-    zoom_pan_settings = {
+    zoom_pan_settings = { -- const
         "kopt_zoom_factor",
         "zoom_overlap_h",
         "zoom_overlap_v",
@@ -71,7 +81,7 @@ local ReaderZooming = InputContainer:new{
     zoom_direction_vertical = nil, -- true for column mode
     current_page = 1,
     rotation = 0,
-    paged_modes = {
+    paged_modes = { -- const
         page = _("Zoom to fit page works best with page view."),
         pageheight = _("Zoom to fit page height works best with page view."),
         contentheight = _("Zoom to fit content height works best with page view."),
@@ -81,56 +91,62 @@ local ReaderZooming = InputContainer:new{
 }
 
 function ReaderZooming:init()
+    self:registerKeyEvents()
+end
+
+function ReaderZooming:registerKeyEvents()
     if Device:hasKeyboard() then
         self.key_events = {
             ZoomIn = {
                 { "Shift", Input.group.PgFwd },
-                doc = "zoom in",
-                event = "Zoom", args = "in"
+                event = "Zoom",
+                args = "in",
             },
             ZoomOut = {
                 { "Shift", Input.group.PgBack },
-                doc = "zoom out",
-                event = "Zoom", args = "out"
+                event = "Zoom",
+                args = "out",
             },
             ZoomToFitPage = {
                 { "A" },
-                doc = "zoom to fit page",
-                event = "SetZoomMode", args = "page"
+                event = "SetZoomMode",
+                args = "page",
             },
             ZoomToFitContent = {
                 { "Shift", "A" },
-                doc = "zoom to fit content",
-                event = "SetZoomMode", args = "content"
+                event = "SetZoomMode",
+                args = "content",
             },
             ZoomToFitPageWidth = {
                 { "S" },
-                doc = "zoom to fit page width",
-                event = "SetZoomMode", args = "pagewidth"
+                event = "SetZoomMode",
+                args = "pagewidth",
             },
             ZoomToFitContentWidth = {
                 { "Shift", "S" },
-                doc = "zoom to fit content width",
-                event = "SetZoomMode", args = "contentwidth"
+                event = "SetZoomMode",
+                args = "contentwidth",
             },
             ZoomToFitPageHeight = {
                 { "D" },
-                doc = "zoom to fit page height",
-                event = "SetZoomMode", args = "pageheight"
+                event = "SetZoomMode",
+                args = "pageheight",
             },
             ZoomToFitContentHeight = {
                 { "Shift", "D" },
-                doc = "zoom to fit content height",
-                event = "SetZoomMode", args = "contentheight"
+                event = "SetZoomMode",
+                args = "contentheight",
             },
             ZoomManual = {
                 { "Shift", "M" },
-                doc = "manual zoom mode",
-                event = "SetZoomMode", args = "manual"
+                event = "SetZoomMode",
+                args = "manual",
             },
         }
     end
 end
+
+ReaderZooming.onPhysicalKeyboardConnected = ReaderZooming.registerKeyEvents
 
 -- Conversions between genus/type combos and zoom_mode...
 function ReaderZooming:mode_to_combo(zoom_mode)
@@ -201,9 +217,7 @@ function ReaderZooming:onReadSettings(config)
     local zoom_mode = config:readSetting("zoom_mode")
     if zoom_mode then
         -- Validate it first
-        zoom_mode = util.arrayContains(self.available_zoom_modes, zoom_mode)
-                and zoom_mode
-                 or self.DEFAULT_ZOOM_MODE
+        zoom_mode = self.zoom_mode_label[zoom_mode] and zoom_mode or self.DEFAULT_ZOOM_MODE
 
         -- Make sure the split genus & type match, to have an up-to-date ConfigDialog...
         local zoom_mode_genus, zoom_mode_type = self:_updateConfigurable(zoom_mode)
@@ -220,9 +234,7 @@ function ReaderZooming:onReadSettings(config)
         end
 
         -- Validate it
-        zoom_mode = util.arrayContains(self.available_zoom_modes, zoom_mode)
-                and zoom_mode
-                 or self.DEFAULT_ZOOM_MODE
+        zoom_mode = self.zoom_mode_label[zoom_mode] and zoom_mode or self.DEFAULT_ZOOM_MODE
     end
 
     -- Import legacy zoom_factor settings
@@ -354,7 +366,7 @@ function ReaderZooming:onDefineZoom(btn, when_applied_callback)
         zoom_mode = zoom_mode_genus
         self.ui:handleEvent(Event:new("SetScrollMode", false))
     end
-    zoom_mode = util.arrayContains(self.available_zoom_modes, zoom_mode) and zoom_mode or self.DEFAULT_ZOOM_MODE
+    zoom_mode = self.zoom_mode_label[zoom_mode] and zoom_mode or self.DEFAULT_ZOOM_MODE
     settings.zoom_mode = zoom_mode
 
     if settings.right_to_left then
@@ -409,7 +421,7 @@ function ReaderZooming:onDefineZoom(btn, when_applied_callback)
     horizontal overlap: %3 %
     vertical overlap: %5 %
     zoom factor: %6]]),
-                zoom_mode,
+                self.zoom_mode_label[zoom_mode],
                 ("%.2f"):format(self:getNumberOf("columns", settings.zoom_overlap_h)),
                 settings.zoom_overlap_h,
                 ("%.2f"):format(self:getNumberOf("rows", settings.zoom_overlap_v)),

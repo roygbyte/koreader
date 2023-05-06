@@ -30,7 +30,7 @@ local Input = Device.input
 local Screen = Device.screen
 local Size = require("ui/size")
 
-local QRMessage = InputContainer:new{
+local QRMessage = InputContainer:extend{
     modal = true,
     timeout = nil, -- in seconds
     text = nil,  -- The text to encode.
@@ -43,10 +43,7 @@ local QRMessage = InputContainer:new{
 
 function QRMessage:init()
     if Device:hasKeys() then
-        self.key_events = {
-            AnyKeyPressed = { { Input.group.Any },
-                seqtext = "any key", doc = "close dialog" }
-        }
+        self.key_events.AnyKeyPressed = { { Input.group.Any } }
     end
     if Device:isTouchDevice() then
         self.ges_events.TapClose = {
@@ -99,15 +96,10 @@ function QRMessage:onShow()
     return true
 end
 
-function QRMessage:onAnyKeyPressed()
-    -- triggered by our defined key events
-    self.dismiss_callback()
-    UIManager:close(self)
-end
-
 function QRMessage:onTapClose()
     self.dismiss_callback()
     UIManager:close(self)
 end
+QRMessage.onAnyKeyPressed = QRMessage.onTapClose
 
 return QRMessage

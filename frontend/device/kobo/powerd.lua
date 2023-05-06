@@ -20,12 +20,12 @@ local KoboPowerD = BasePowerD:new{
     fl_was_on = nil,
 }
 
---- @todo Remove KOBO_LIGHT_ON_START
+--- @todo Remove G_defaults:readSetting("KOBO_LIGHT_ON_START")
 function KoboPowerD:_syncKoboLightOnStart()
     local new_intensity = nil
     local is_frontlight_on = nil
     local new_warmth = nil
-    local kobo_light_on_start = tonumber(KOBO_LIGHT_ON_START)
+    local kobo_light_on_start = tonumber(G_defaults:readSetting("KOBO_LIGHT_ON_START"))
     if kobo_light_on_start then
         if kobo_light_on_start > 0 then
             new_intensity = math.min(kobo_light_on_start, 100)
@@ -42,7 +42,7 @@ function KoboPowerD:_syncKoboLightOnStart()
                     -- ColorSetting is stored as a color temperature scale in Kelvin,
                     -- from 1500 to 6400
                     -- so normalize this to [0, 100] on our end.
-                    new_warmth = (100 - Math.round((new_color - 1500) / 49))
+                    new_warmth = (100 - Math.round((new_color - 1500) * (1/49)))
                 end
             end
             if is_frontlight_on == nil then
@@ -203,7 +203,7 @@ function KoboPowerD:saveSettings()
             G_reader_settings:saveSetting("frontlight_warmth", cur_warmth)
         end
         -- And to "Kobo eReader.conf" if needed
-        if KOBO_SYNC_BRIGHTNESS_WITH_NICKEL then
+        if G_defaults:readSetting("KOBO_SYNC_BRIGHTNESS_WITH_NICKEL") then
             if NickelConf.frontLightState.get() ~= nil then
                 if NickelConf.frontLightState.get() ~= cur_is_fl_on then
                     NickelConf.frontLightState.set(cur_is_fl_on)
@@ -302,8 +302,12 @@ function KoboPowerD:turnOffFrontlightHW()
         return
     end
     ffiUtil.runInSubProcess(function()
-        for i = 1,5 do
-            self:setIntensityHW(math.floor(self.fl_intensity - ((self.fl_intensity / 5) * i)))
+        for i = 1, 5 do
+            -- NOTE: Do *not* switch to (self.fl_intensity * (1/5) * i) here, it may lead to rounding errors,
+            --       which is problematic paired w/ math.floor because it doesn't round towards zero,
+            --       which means we may end up passing -1 to setIntensityHW, which will fail,
+            --       because we're bypassing the clamping usually done by setIntensity...
+            self:setIntensityHW(math.floor(self.fl_intensity - (self.fl_intensity / 5 * i)))
             --- @note: Newer devices appear to block slightly longer on FL ioctls/sysfs, so only sleep on older devices,
             ---        otherwise we get a jump and not a ramp ;).
             if not self.device:hasNaturalLight() then
@@ -335,8 +339,8 @@ function KoboPowerD:turnOnFrontlightHW()
         return
     end
     ffiUtil.runInSubProcess(function()
-        for i = 1,5 do
-            self:setIntensityHW(math.ceil(self.fl_min + ((self.fl_intensity / 5) * i)))
+        for i = 1, 5 do
+            self:setIntensityHW(math.ceil(self.fl_min + (self.fl_intensity / 5 * i)))
             --- @note: Newer devices appear to block slightly longer on FL ioctls/sysfs, so only sleep on older devices,
             ---        otherwise we get a jump and not a ramp ;).
             if not self.device:hasNaturalLight() then

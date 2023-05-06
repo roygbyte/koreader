@@ -37,7 +37,7 @@ local VerticalSpan = require("ui/widget/verticalspan")
 local _ = require("gettext")
 local Screen = require("device").screen
 
-local MultiConfirmBox = InputContainer:new{
+local MultiConfirmBox = InputContainer:extend{
     modal = true,
     text = _("no text"),
     face = Font:getFace("infofont"),
@@ -71,7 +71,7 @@ function MultiConfirmBox:init()
             }
         end
         if Device:hasKeys() then
-            self.key_events.Close = { {Device.input.group.Back}, doc = "cancel" }
+            self.key_events.Close = { { Device.input.group.Back } }
         end
     end
     local content = HorizontalGroup:new{

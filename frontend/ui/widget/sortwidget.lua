@@ -26,7 +26,7 @@ local util = require("util")
 local T = require("ffi/util").template
 local _ = require("gettext")
 
-local SortItemWidget = InputContainer:new{
+local SortItemWidget = InputContainer:extend{
     item = nil,
     face = Font:getFace("smallinfofont"),
     width = nil,
@@ -34,7 +34,7 @@ local SortItemWidget = InputContainer:new{
 }
 
 function SortItemWidget:init()
-    self.dimen = Geom:new{w = self.width, h = self.height}
+    self.dimen = Geom:new{x = 0, y = 0, w = self.width, h = self.height}
     self.ges_events.Tap = {
         GestureRange:new{
             ges = "tap",
@@ -75,7 +75,7 @@ function SortItemWidget:init()
                 w = self.width,
                 h = self.height,
             },
-            HorizontalGroup:new {
+            HorizontalGroup:new{
                 align = "center",
                 CenterContainer:new{
                     dimen = Geom:new{ w = checked_widget:getSize().w },
@@ -84,7 +84,7 @@ function SortItemWidget:init()
                 TextWidget:new{
                     text = self.item.text,
                     max_width = text_max_width,
-                    face = self.face,
+                    face = self.item.face or self.face,
                 },
             },
         },
@@ -98,7 +98,11 @@ function SortItemWidget:onTap(_, ges)
             self.item:callback()
         end
     elseif self.show_parent.sort_disabled then
-        return true
+        if self.item.callback then
+            self.item:callback()
+        else
+            return true
+        end
     elseif self.show_parent.marked == self.index then
         self.show_parent.marked = 0
     else
@@ -109,14 +113,16 @@ function SortItemWidget:onTap(_, ges)
 end
 
 function SortItemWidget:onHold()
-    if self.item.callback then
+    if self.item.hold_callback then
+        self.item:hold_callback(function() self.show_parent:_populateItems() end)
+    elseif self.item.callback then
         self.item:callback()
         self.show_parent:_populateItems()
     end
     return true
 end
 
-local SortWidget = FocusManager:new{
+local SortWidget = FocusManager:extend{
     title = "",
     width = nil,
     height = nil,
@@ -135,13 +141,19 @@ function SortWidget:init()
     self.orig_item_table = nil
 
     self.dimen = Geom:new{
+        x = 0,
+        y = 0,
         w = self.width or Screen:getWidth(),
         h = self.height or Screen:getHeight(),
     }
+    if self.dimen.h == Screen:getHeight() then
+        self.covers_footer = true
+    end
+
     if Device:hasKeys() then
-        self.key_events.Close = { { Device.input.group.Back }, doc = "close dialog" }
-        self.key_events.NextPage = { { Device.input.group.PgFwd}, doc = "next page"}
-        self.key_events.PrevPage = { { Device.input.group.PgBack}, doc = "prev page"}
+        self.key_events.Close = { { Device.input.group.Back } }
+        self.key_events.NextPage = { { Device.input.group.PgFwd } }
+        self.key_events.PrevPage = { { Device.input.group.PgBack } }
     end
     if Device:isTouchDevice() then
         self.ges_events.Swipe = {
@@ -154,8 +166,8 @@ function SortWidget:init()
     local padding = Size.padding.large
     self.width_widget = self.dimen.w - 2 * padding
     self.item_width = self.dimen.w - 2 * padding
-    self.footer_center_width = math.floor(self.width_widget * 22 / 100)
-    self.footer_button_width = math.floor(self.width_widget * 12 / 100)
+    self.footer_center_width = math.floor(self.width_widget * (22/100))
+    self.footer_button_width = math.floor(self.width_widget * (12/100))
     self.item_height = Size.item.height_big
     -- group for footer
     local chevron_left = "chevron.left"

@@ -14,37 +14,61 @@ local Notification = require("ui/widget/notification")
 local QRMessage = require("ui/widget/qrmessage")
 local UIManager = require("ui/uimanager")
 local ffiutil = require("ffi/util")
+local lfs = require("libs/libkoreader-lfs")
 local logger = require("logger")
 local util = require("util")
 local _ = require("gettext")
 local Screen = Device.screen
 local T = ffiutil.template
 
-local ReaderLink = InputContainer:new{
-    location_stack = {}
+local function is_wiki_page(link_url)
+    if not link_url then
+        return false
+    end
+    local wiki_lang, wiki_page = link_url:match([[https?://([^%.]+).wikipedia.org/wiki/([^/]+)]])
+    if wiki_lang and wiki_page then
+        -- Ask for user confirmation before launching lookup (on a
+        -- wikipedia page saved as epub, full of wikipedia links, it's
+        -- too easy to click on links when wanting to change page...)
+        -- But first check if this wikipedia article has been saved as EPUB
+        local epub_filename = wiki_page .. "."..string.upper(wiki_lang)..".epub"
+        local epub_fullpath
+        -- either in current book directory
+        local last_file = G_reader_settings:readSetting("lastfile")
+        if last_file then
+            local current_book_dir = last_file:match("(.*)/")
+            local safe_filename = util.getSafeFilename(epub_filename, current_book_dir):gsub("_", " ")
+            local epub_path = current_book_dir .. "/" .. safe_filename
+            if util.pathExists(epub_path) then
+                epub_fullpath = epub_path
+            end
+        end
+        -- or in wikipedia save directory
+        if not epub_fullpath then
+            local dir = G_reader_settings:readSetting("wikipedia_save_dir")
+            if not dir then dir = G_reader_settings:readSetting("home_dir") end
+            if not dir then dir = require("apps/filemanager/filemanagerutil").getDefaultDir() end
+            if dir then
+                local safe_filename = util.getSafeFilename(epub_filename, dir):gsub("_", " ")
+                local epub_path = dir .. "/" .. safe_filename
+                if util.pathExists(epub_path) then
+                    epub_fullpath = epub_path
+                end
+            end
+        end
+        return wiki_lang, wiki_page, epub_fullpath
+    else
+        return false
+    end
+end
+
+local ReaderLink = InputContainer:extend{
+    location_stack = nil, -- table, per-instance
+    _external_link_buttons = nil,
 }
 
 function ReaderLink:init()
-    if Device:hasKeys() then
-        self.key_events.SelectNextPageLink = {
-            {"Tab" },
-            doc = "select next page link",
-            event = "SelectNextPageLink",
-        }
-        self.key_events.SelectPrevPageLink = {
-            {"Shift", "Tab" },
-            {"Sym", "Tab" }, -- Right Shift + Tab
-            doc = "select previous page link",
-            event = "SelectPrevPageLink",
-        }
-        self.key_events.GotoSelectedPageLink = {
-            { "Press" },
-            doc = "go to selected page link",
-            event = "GotoSelectedPageLink",
-        }
-        -- "Back" is handled by ReaderBack, which will call our onGoBackLink()
-        -- when G_reader_settings:readSetting("back_in_reader") == "previous_location"
-    end
+    self:registerKeyEvents()
     if Device:isTouchDevice() then
         self.ui:registerTouchZones({
             {
@@ -106,7 +130,123 @@ function ReaderLink:init()
         G_reader_settings:saveSetting("swipe_link_footnote_popup", nil)
         G_reader_settings:saveSetting("footnote_link_in_popup", true)
     end
+
+    -- delegate gesture listener to readerui, NOP our own
+    self.ges_events = nil
+
+    -- Set up buttons for alternative external link handling methods
+    self._external_link_buttons = {}
+    self._external_link_buttons["10_copy"] = function(this, link_url)
+        return {
+            text = _("Copy"),
+            callback = function()
+                UIManager:close(this.external_link_dialog)
+            end,
+        }
+    end
+    self._external_link_buttons["20_qrcode"] = function(this, link_url)
+        return {
+            text = _("Show QR code"),
+            callback = function()
+                UIManager:close(this.external_link_dialog)
+                UIManager:show(QRMessage:new{
+                    text = link_url,
+                    width = Device.screen:getWidth(),
+                    height = Device.screen:getHeight()
+                })
+            end
+        }
+    end
+    self._external_link_buttons["30_browser"] = function(this, link_url)
+        return {
+            text = _("Open in browser"),
+            callback = function()
+                UIManager:close(this.external_link_dialog)
+                Device:openLink(link_url)
+            end,
+            show_in_dialog_func = function()
+                if Device:canOpenLink() then
+                    return true
+                end
+            end
+        }
+    end
+    self._external_link_buttons["40_wiki_lookup"] = function(this, link_url)
+        return {
+            text = _("Read online"),
+            callback = function()
+                UIManager:nextTick(function()
+                    UIManager:close(this.external_link_dialog)
+                    local wiki_lang, wiki_page = is_wiki_page(link_url)
+                    self.ui:handleEvent(Event:new("LookupWikipedia", wiki_page, true, false, true, wiki_lang))
+                end)
+            end,
+            show_in_dialog_func = function()
+                local wiki_lang, wiki_page = is_wiki_page(link_url)
+                if wiki_lang and wiki_page then
+                    logger.dbg("Wikipedia link:", wiki_lang, wiki_page)
+                    local text = T(_("Would you like to read this Wikipedia %1 article?\n\n%2\n"), wiki_lang:upper(), wiki_page:gsub("_", " "))
+                    return true, text
+                else
+                    return false
+                end
+            end
+        }
+    end
+    self._external_link_buttons["45_wiki_saved"] = function(this, link_url)
+        return {
+            text = _("Read EPUB"),
+            callback = function()
+                UIManager:scheduleIn(0.1, function()
+                    UIManager:close(this.external_link_dialog)
+                    local _, _, wiki_epub_fullpath = is_wiki_page(link_url)
+                    self.ui:switchDocument(wiki_epub_fullpath)
+                end)
+            end,
+            show_in_dialog_func = function()
+                local wiki_lang, wiki_page, wiki_epub_fullpath = is_wiki_page(link_url)
+                if wiki_lang and wiki_page and wiki_epub_fullpath then
+                    local text = T(_("This article has previously been saved as EPUB. You may wish to read the saved EPUB instead."))
+                    return true, text
+                end
+            end
+        }
+    end
+    self._external_link_buttons["90_cancel"] = function(this, link_url)
+        return {
+            text = _("Cancel"),
+            callback = function()
+                UIManager:close(this.external_link_dialog)
+            end,
+        }
+    end
 end
+
+function ReaderLink:onGesture() end
+
+function ReaderLink:registerKeyEvents()
+    if Device:hasKeys() then
+        self.key_events = {
+            SelectNextPageLink = {
+                { "Tab" },
+                event = "SelectNextPageLink",
+            },
+            SelectPrevPageLink = {
+                { "Shift", "Tab" },
+                { "Sym", "Tab" }, -- Shift or Sym + Tab
+                event = "SelectPrevPageLink",
+            },
+            GotoSelectedPageLink = {
+                { "Press" },
+                event = "GotoSelectedPageLink",
+            },
+            -- "Back" is handled by ReaderBack, which will call our onGoBackLink()
+            -- when G_reader_settings:readSetting("back_in_reader") == "previous_location"
+        }
+    end
+end
+
+ReaderLink.onPhysicalKeyboardConnected = ReaderLink.registerKeyEvents
 
 function ReaderLink:onReadSettings(config)
     -- called when loading new document
@@ -153,7 +293,7 @@ function ReaderLink:addToMainMenu(menu_items)
     -- insert table to main reader menu
     menu_items.go_to_previous_location = {
         text = _("Go back to previous location"),
-        enabled_func = function() return #self.location_stack > 0 end,
+        enabled_func = function() return self.location_stack and #self.location_stack > 0 end,
         callback = function() self:onGoBackLink() end,
         hold_callback = function(touchmenu_instance)
             UIManager:show(ConfirmBox:new{
@@ -465,7 +605,7 @@ function ReaderLink:showLinkBox(link, allow_footnote_popup)
         if sbox then
             UIManager:show(LinkBox:new{
                 box = sbox,
-                timeout = FOLLOW_LINK_TIMEOUT,
+                timeout = G_defaults:readSetting("FOLLOW_LINK_TIMEOUT"),
                 callback = function()
                     self:onGotoLink(link.link, false, allow_footnote_popup)
                 end
@@ -676,137 +816,12 @@ function ReaderLink:onGotoLink(link, neglect_current_location, allow_footnote_po
 end
 
 function ReaderLink:onGoToExternalLink(link_url)
-    local text
-    local dialog
-    local buttons = {
-        {
-            {
-                text = _("Cancel"),
-                callback = function()
-                    UIManager:close(dialog)
-                end,
-            },
-        },
-    }
-    local add_button = function(button)
-        if #buttons[#buttons] >= 2 then
-            -- add new row if last contains already 2
-            table.insert(buttons, {})
-        end
-        -- append button to last row
-        table.insert(buttons[#buttons], button)
-    end
-    -- Set up buttons for alternative external link handling methods
-    local alt_handlers_buttons = {}
-    table.insert(alt_handlers_buttons, {
-        text = _("Copy"),
-        callback = function()
-            UIManager:close(dialog)
-            Device.input.setClipboardText(link_url)
-        end,
-    })
-    table.insert(alt_handlers_buttons, {
-        text = _("Show QR code"),
-        callback = function()
-            UIManager:close(dialog)
-            UIManager:show(QRMessage:new{
-                text = link_url,
-                width = Device.screen:getWidth(),
-                height = Device.screen:getHeight()
-            })
-        end,
-    })
-    if self.ui.wallabag then
-        table.insert(alt_handlers_buttons, {
-            text = _("Add to Wallabag"),
-            callback = function()
-                UIManager:close(dialog)
-                self.ui:handleEvent(Event:new("AddWallabagArticle", link_url))
-            end,
-        })
-    end
-    if Device:canOpenLink() then
-        table.insert(alt_handlers_buttons, {
-            text = _("Open in browser"),
-            callback = function()
-                UIManager:close(dialog)
-                Device:openLink(link_url)
-            end,
-        })
-    end
-
-    -- Check if it is a wikipedia link
-    local wiki_lang, wiki_page = link_url:match([[https?://([^%.]+).wikipedia.org/wiki/([^/]+)]])
-    if wiki_lang and wiki_page then
-        logger.dbg("Wikipedia link:", wiki_lang, wiki_page)
-        -- Ask for user confirmation before launching lookup (on a
-        -- wikipedia page saved as epub, full of wikipedia links, it's
-        -- too easy to click on links when wanting to change page...)
-        -- But first check if this wikipedia article has been saved as EPUB
-        local epub_filename = wiki_page .. "."..string.upper(wiki_lang)..".epub"
-        local epub_fullpath
-        -- either in current book directory
-        local last_file = G_reader_settings:readSetting("lastfile")
-        if last_file then
-            local current_book_dir = last_file:match("(.*)/")
-            local safe_filename = util.getSafeFilename(epub_filename, current_book_dir):gsub("_", " ")
-            local epub_path = current_book_dir .. "/" .. safe_filename
-            if util.pathExists(epub_path) then
-                epub_fullpath = epub_path
-            end
-        end
-        -- or in wikipedia save directory
-        if not epub_fullpath then
-            local dir = G_reader_settings:readSetting("wikipedia_save_dir")
-            if not dir then dir = G_reader_settings:readSetting("home_dir") end
-            if not dir then dir = require("apps/filemanager/filemanagerutil").getDefaultDir() end
-            if dir then
-                local safe_filename = util.getSafeFilename(epub_filename, dir):gsub("_", " ")
-                local epub_path = dir .. "/" .. safe_filename
-                if util.pathExists(epub_path) then
-                    epub_fullpath = epub_path
-                end
-            end
-        end
-        text = T(_("Would you like to read this Wikipedia %1 article?\n\n%2\n"), wiki_lang:upper(), wiki_page:gsub("_", " "))
-        add_button({
-            text = _("Read online"),
-            callback = function()
-                UIManager:nextTick(function()
-                    UIManager:close(dialog)
-                    self.ui:handleEvent(Event:new("LookupWikipedia", wiki_page, true, false, true, wiki_lang))
-                end)
-            end,
-        })
-        if epub_fullpath then
-            text = T("%1\n%2", text, _("This article has previously been saved as EPUB. You may wish to read the saved EPUB instead."))
-            add_button({
-                text = _("Read EPUB"),
-                callback = function()
-                    UIManager:scheduleIn(0.1, function()
-                        UIManager:close(dialog)
-                        self.ui:switchDocument(epub_fullpath)
-                    end)
-                end,
-            })
-        end
-    else
-        if #alt_handlers_buttons == 0 then
-            -- No external link handler
-            return false
-        end
-        text = T(_("External link:\n\n%1"), BD.url(link_url))
-    end
-
-    -- Add all alternative handlers buttons
-    for __, button in ipairs(alt_handlers_buttons) do
-        add_button(button)
-    end
-    dialog = ButtonDialogTitle:new{
-        title = text,
+    local buttons, title = self:getButtonsForExternalLinkDialog(link_url)
+    self.external_link_dialog = ButtonDialogTitle:new{
+        title = title,
         buttons = buttons,
     }
-    UIManager:show(dialog)
+    UIManager:show(self.external_link_dialog)
     return true
 end
 
@@ -889,8 +904,8 @@ function ReaderLink:onGoToPageLink(ges, internal_links_only, max_distance)
         local shortest_dist = nil
         for _, link in ipairs(links) do
             if not internal_links_only or link.page then
-                local start_dist = math.pow(link.x0 - pos_x, 2) + math.pow(link.y0 - pos_y, 2)
-                local end_dist = math.pow(link.x1 - pos_x, 2) + math.pow(link.y1 - pos_y, 2)
+                local start_dist = (link.x0 - pos_x)^2 + (link.y0 - pos_y)^2
+                local end_dist = (link.x1 - pos_x)^2 + (link.y1 - pos_y)^2
                 local min_dist = math.min(start_dist, end_dist)
                 if shortest_dist == nil or min_dist < shortest_dist then
                     -- onGotoLink()'s GotoPage event needs the link
@@ -979,17 +994,17 @@ function ReaderLink:onGoToPageLink(ges, internal_links_only, max_distance)
                         -- and we compute each part individually
                         -- First, vertical distance (squared)
                         if pos_y < segment.y0 then -- above the segment height
-                            segment_dist = math.pow(segment.y0 - pos_y, 2)
+                            segment_dist = (segment.y0 - pos_y)^2
                         elseif pos_y > segment.y1 then -- below the segment height
-                            segment_dist = math.pow(pos_y - segment.y1, 2)
+                            segment_dist = (pos_y - segment.y1)^2
                         else -- gesture pos is on the segment height, no vertical distance
                             segment_dist = 0
                         end
                         -- Next, horizontal distance (squared)
                         if pos_x < segment.x0 then -- on the left of segment: calc dist to x0
-                            segment_dist = segment_dist + math.pow(segment.x0 - pos_x, 2)
+                            segment_dist = segment_dist + (segment.x0 - pos_x)^2
                         elseif pos_x > segment.x1 then -- on the right of segment : calc dist to x1
-                            segment_dist = segment_dist + math.pow(pos_x - segment.x1, 2)
+                            segment_dist = segment_dist + (pos_x - segment.x1)^2
                         -- else -- gesture pos is in the segment width, no horizontal distance
                         end
                         if shortest_dist == nil or segment_dist < shortest_dist then
@@ -1012,8 +1027,8 @@ function ReaderLink:onGoToPageLink(ges, internal_links_only, max_distance)
                     -- We used to just check distance from start_x and end_x, and
                     -- we could miss a tap in the middle of a long link.
                     -- (also start_y = end_y = the top of the rect for a link on a single line)
-                    local start_dist = math.pow(link.start_x - pos_x, 2) + math.pow(link.start_y - pos_y, 2)
-                    local end_dist = math.pow(link.end_x - pos_x, 2) + math.pow(link.end_y - pos_y, 2)
+                    local start_dist = (link.start_x - pos_x)^2 + (link.start_y - pos_y)^2
+                    local end_dist = (link.end_x - pos_x)^2 + (link.end_y - pos_y)^2
                     local min_dist = math.min(start_dist, end_dist)
                     if shortest_dist == nil or min_dist < shortest_dist then
                         selected_link = link
@@ -1049,7 +1064,7 @@ function ReaderLink:onGoToPageLink(ges, internal_links_only, max_distance)
         end
     end
     if selected_link then
-        if max_distance and selected_distance2 and selected_distance2 > math.pow(max_distance, 2) then
+        if max_distance and selected_distance2 and selected_distance2 > max_distance^2 then
             logger.dbg("nearest link is further than max distance, ignoring it")
         else
             return self:onGotoLink(selected_link, false, isFootnoteLinkInPopupEnabled())
@@ -1279,16 +1294,16 @@ function ReaderLink:showAsFootnotePopup(link, neglect_current_location)
     local is_footnote, reason, extStopReason, extStartXP, extEndXP =
             self.ui.document:isLinkToFootnote(source_xpointer, target_xpointer, flags, max_text_size)
     if not is_footnote then
-        logger.info("not a footnote:", reason)
+        logger.dbg("not a footnote:", reason)
         return false
     end
-    logger.info("is a footnote:", reason)
+    logger.dbg("is a footnote:", reason)
     if extStartXP then
-        logger.info("  extended until:", extStopReason)
-        logger.info(extStartXP)
-        logger.info(extEndXP)
+        logger.dbg("  extended until:", extStopReason)
+        logger.dbg(extStartXP)
+        logger.dbg(extEndXP)
     else
-        logger.info("  not extended because:", extStopReason)
+        logger.dbg("  not extended because:", extStopReason)
     end
     -- OK, done with the dirty footnote detection work, we can now
     -- get back to the fancy UI stuff
@@ -1392,6 +1407,57 @@ function ReaderLink:showAsFootnotePopup(link, neglect_current_location)
     }
     UIManager:show(popup)
     return true
+end
+
+function ReaderLink:addToExternalLinkDialog(idx, fn_button)
+    self._external_link_buttons[idx] = fn_button
+end
+
+function ReaderLink:removeFromExternalLinkDialog(idx)
+    local button = self._external_link_buttons[idx]
+    self._external_link_buttons[idx] = nil
+    return button
+end
+
+function ReaderLink:getButtonsForExternalLinkDialog(link_url)
+    local buttons = {{}}
+    local columns = 2
+
+    local default_title =  T(_("External link:\n\n%1"), BD.url(link_url))
+    local title = default_title
+
+    for idx, fn_button in ffiutil.orderedPairs(self._external_link_buttons) do
+        local button = fn_button(self, link_url)
+        local show, button_title
+
+        if type(button.show_in_dialog_func) == "function" then
+            show, button_title = button.show_in_dialog_func(link_url)
+        else
+            -- If the button doesn't have the show_in_dialog_func, then assume that the button
+            -- should be shown. Default buttons (which are always shown) will be like this.
+            show = true
+        end
+        if show then
+            -- Add button to the buttons table
+            if #buttons[#buttons] >= columns then
+                table.insert(buttons, {})
+            end
+            table.insert(buttons[#buttons], button)
+            logger.dbg("ReaderLink", idx..": line "..#buttons..", col "..#buttons[#buttons])
+        end
+        if button_title then
+            -- Create the title for the button
+            if title == default_title then
+                -- The default title is replaced by the first non-default button title.
+                title = button_title
+            else
+                -- Every other button title value is appended to the title.
+                title = title .. "\n\n" .. button_title
+            end
+        end
+    end
+
+    return buttons, title
 end
 
 return ReaderLink

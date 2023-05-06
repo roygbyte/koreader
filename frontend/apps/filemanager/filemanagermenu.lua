@@ -1,6 +1,5 @@
 local BD = require("ui/bidi")
 local CenterContainer = require("ui/widget/container/centercontainer")
-local CloudStorage = require("apps/cloudstorage/cloudstorage")
 local ConfirmBox = require("ui/widget/confirmbox")
 local Device = require("device")
 local Event = require("ui/event")
@@ -20,7 +19,7 @@ local T = FFIUtil.template
 
 local FileManagerMenu = InputContainer:extend{
     tab_item_table = nil,
-    menu_items = {},
+    menu_items = nil, -- table, mandatory
     registered_widgets = nil,
 }
 
@@ -49,20 +48,27 @@ function FileManagerMenu:init()
 
     self.registered_widgets = {}
 
-    if Device:hasKeys() then
-        self.key_events = {
-            ShowMenu = { { "Menu" }, doc = "show menu" },
-        }
-    end
+    self:registerKeyEvents()
+
     self.activation_menu = G_reader_settings:readSetting("activate_menu")
     if self.activation_menu == nil then
         self.activation_menu = "swipe_tap"
     end
 end
 
+function FileManagerMenu:registerKeyEvents()
+    if Device:hasKeys() then
+        self.key_events.ShowMenu = { { "Menu" } }
+    end
+end
+
+FileManagerMenu.onPhysicalKeyboardConnected = FileManagerMenu.registerKeyEvents
+
 function FileManagerMenu:initGesListener()
     if not Device:isTouchDevice() then return end
 
+    local DTAP_ZONE_MENU = G_defaults:readSetting("DTAP_ZONE_MENU")
+    local DTAP_ZONE_MENU_EXT = G_defaults:readSetting("DTAP_ZONE_MENU_EXT")
     self:registerTouchZones({
         {
             id = "filemanager_tap",
@@ -304,7 +310,7 @@ function FileManagerMenu:setUpdateItemTable()
                                 home_dir = Device.home_dir
                             end
                             UIManager:show(ConfirmBox:new{
-                                text = text .. "\nChoose new folder to set as home?",
+                                text = text .. "\n" .. _("Choose new folder to set as home?"),
                                 ok_text = _("Choose folder"),
                                 ok_callback = function()
                                     local path_chooser = require("ui/widget/pathchooser"):new{
@@ -423,9 +429,6 @@ To:
         callback = function()
             SetDefaults:ConfirmEdit()
         end,
-        hold_callback = function()
-            SetDefaults:ConfirmSave()
-        end,
     }
     self.menu_items.plugin_management = {
         text = _("Plugin management"),
@@ -450,10 +453,7 @@ To:
                             -- Also remove from the Cache objet references to the cache files we've just deleted
                             local Cache = require("cache")
                             Cache.cached = {}
-                            local InfoMessage = require("ui/widget/infomessage")
-                            UIManager:show(InfoMessage:new{
-                                text = _("Caches cleared. Please restart KOReader."),
-                            })
+                            UIManager:askForRestart(_("Caches cleared. Please restart KOReader."))
                         end,
                     })
                 end,
@@ -501,10 +501,7 @@ To:
             end,
             callback = function()
                 G_reader_settings:flipNilOrFalse("dev_startup_no_fbdepth")
-                local InfoMessage = require("ui/widget/infomessage")
-                UIManager:show(InfoMessage:new{
-                    text = _("This will take effect on next restart."),
-                })
+                UIManager:askForRestart()
             end,
         })
     end
@@ -517,29 +514,24 @@ To:
             end,
             callback = function()
                 G_reader_settings:flipNilOrFalse("dev_abort_on_crash")
-                local InfoMessage = require("ui/widget/infomessage")
-                UIManager:show(InfoMessage:new{
-                    text = _("This will take effect on next restart."),
-                })
+                UIManager:askForRestart()
             end,
         })
     end
-    if not Device.should_restrict_JIT then
-        local Blitbuffer = require("ffi/blitbuffer")
-        table.insert(self.menu_items.developer_options.sub_item_table, {
-            text = _("Disable C blitter"),
-            enabled_func = function()
-                return Blitbuffer.has_cblitbuffer
-            end,
-            checked_func = function()
-                return G_reader_settings:isTrue("dev_no_c_blitter")
-            end,
-            callback = function()
-                G_reader_settings:flipNilOrFalse("dev_no_c_blitter")
-                Blitbuffer:enableCBB(G_reader_settings:nilOrFalse("dev_no_c_blitter"))
-            end,
-        })
-    end
+    local Blitbuffer = require("ffi/blitbuffer")
+    table.insert(self.menu_items.developer_options.sub_item_table, {
+        text = _("Disable C blitter"),
+        enabled_func = function()
+            return Blitbuffer.has_cblitbuffer
+        end,
+        checked_func = function()
+            return G_reader_settings:isTrue("dev_no_c_blitter")
+        end,
+        callback = function()
+            G_reader_settings:flipNilOrFalse("dev_no_c_blitter")
+            Blitbuffer:enableCBB(G_reader_settings:nilOrFalse("dev_no_c_blitter"))
+        end,
+    })
     if Device:hasEinkScreen() and Device:canHWDither() then
         table.insert(self.menu_items.developer_options.sub_item_table, {
             text = _("Disable HW dithering"),
@@ -601,10 +593,7 @@ To:
                     mxcfb_bypass_wait_for = not Device:hasReliableMxcWaitFor()
                 end
                 G_reader_settings:saveSetting("mxcfb_bypass_wait_for", not mxcfb_bypass_wait_for)
-                local InfoMessage = require("ui/widget/infomessage")
-                UIManager:show(InfoMessage:new{
-                    text = _("This will take effect on next restart."),
-                })
+                UIManager:askForRestart()
             end,
         })
     end
@@ -621,10 +610,7 @@ To:
             end,
             callback = function()
                 G_reader_settings:flipNilOrFalse("pb_ignore_b288_quirks")
-                local InfoMessage = require("ui/widget/infomessage")
-                UIManager:show(InfoMessage:new{
-                    text = _("This will take effect on next restart."),
-                })
+                UIManager:askForRestart()
             end,
         })
     end
@@ -644,10 +630,7 @@ To:
         end,
         callback = function()
             G_reader_settings:flipNilOrTrue("use_xtext")
-            local InfoMessage = require("ui/widget/infomessage")
-            UIManager:show(InfoMessage:new{
-                text = _("This will take effect on next restart."),
-            })
+            UIManager:askForRestart()
         end,
     })
     table.insert(self.menu_items.developer_options.sub_item_table, {
@@ -660,10 +643,7 @@ To:
                 end,
                 callback = function()
                     G_reader_settings:flipNilOrFalse("dev_reverse_ui_layout_mirroring")
-                    local InfoMessage = require("ui/widget/infomessage")
-                    UIManager:show(InfoMessage:new{
-                        text = _("This will take effect on next restart."),
-                    })
+                    UIManager:askForRestart()
                 end
             },
             {
@@ -673,10 +653,7 @@ To:
                 end,
                 callback = function()
                     G_reader_settings:flipNilOrFalse("dev_reverse_ui_text_direction")
-                    local InfoMessage = require("ui/widget/infomessage")
-                    UIManager:show(InfoMessage:new{
-                        text = _("This will take effect on next restart."),
-                    })
+                    UIManager:askForRestart()
                 end
             }
         }
@@ -702,11 +679,30 @@ To:
             touchmenu_instance:updateItems()
         end,
     })
+    table.insert(self.menu_items.developer_options.sub_item_table, {
+        text = _("Dump the fontlist cache"),
+        callback = function()
+            local FontList = require("fontlist")
+            FontList:dumpFontList()
+        end,
+    })
+    if Device:isKobo() and Device:canToggleChargingLED() then
+        table.insert(self.menu_items.developer_options.sub_item_table, {
+            -- @translators This is a debug option to help determine cases when standby failed to initiate properly. PM = power management.
+            text = _("Turn on the LED on PM entry failure"),
+            checked_func = function()
+                return G_reader_settings:isTrue("pm_debug_entry_failure")
+            end,
+            callback = function()
+                G_reader_settings:toggle("pm_debug_entry_failure")
+            end,
+        })
+    end
 
     self.menu_items.cloud_storage = {
         text = _("Cloud storage"),
         callback = function()
-            local cloud_storage = CloudStorage:new{}
+            local cloud_storage = require("apps/cloudstorage/cloudstorage"):new{}
             UIManager:show(cloud_storage)
             local filemanagerRefresh = function() self.ui:onRefresh() end
             function cloud_storage:onClose()
@@ -875,10 +871,10 @@ function FileManagerMenu:_getTabIndexFromLocation(ges)
     if not ges then
         return last_tab_index
     -- if the start position is far right
-    elseif ges.pos.x > 2 * Screen:getWidth() / 3 then
+    elseif ges.pos.x > Screen:getWidth() * (2/3) then
         return BD.mirroredUILayout() and 1 or #self.tab_item_table
     -- if the start position is far left
-    elseif ges.pos.x < Screen:getWidth() / 3 then
+    elseif ges.pos.x < Screen:getWidth() * (1/3) then
         return BD.mirroredUILayout() and #self.tab_item_table or 1
     -- if center return the last index
     else
@@ -906,6 +902,11 @@ function FileManagerMenu:onSetDimensions(dimen)
     if Device:isTouchDevice() then
         self:initGesListener()
     end
+end
+
+function FileManagerMenu:onMenuSearch()
+    self:onShowMenu()
+    self.menu_container[1]:onShowMenuSearch()
 end
 
 function FileManagerMenu:registerToMainMenu(widget)

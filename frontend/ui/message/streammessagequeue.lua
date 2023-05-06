@@ -7,17 +7,17 @@ local zmq = ffi.load("libs/libzmq.so.4")
 local czmq = ffi.load("libs/libczmq.so.1")
 local C = ffi.C
 
-local StreamMessageQueue = MessageQueue:new{
+local StreamMessageQueue = MessageQueue:extend{
     host = nil,
     port = nil,
 }
 
 function StreamMessageQueue:start()
-    self.context = czmq.zctx_new();
+    self.context = czmq.zctx_new()
     self.socket = czmq.zsocket_new(self.context, C.ZMQ_STREAM)
     self.poller = czmq.zpoller_new(self.socket, nil)
     local endpoint = string.format("tcp://%s:%d", self.host, self.port)
-    logger.warn("connect to endpoint", endpoint)
+    logger.dbg("connecting to endpoint", endpoint)
     local rc = czmq.zsocket_connect(self.socket, endpoint)
     if rc ~= 0 then
         error("cannot connect to " .. endpoint)

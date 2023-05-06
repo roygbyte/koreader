@@ -1,5 +1,4 @@
 require("commonrequire")
-local TimeVal = require("ui/timeval")
 local time = require("ui/time")
 local ffi = require("ffi")
 local dummy = require("ffi/posix_h")
@@ -29,37 +28,36 @@ local MockTime = {
 }
 
 function MockTime:install()
-    assert(self ~= nil)
     if self.original_util_time == nil then
         self.original_util_time = util.gettime
         assert(self.original_util_time ~= nil)
     end
     if self.original_tv_realtime == nil then
-        self.original_tv_realtime = TimeVal.realtime
+        self.original_tv_realtime = time.realtime
         assert(self.original_tv_realtime ~= nil)
     end
     if self.original_tv_realtime_coarse == nil then
-        self.original_tv_realtime_coarse = TimeVal.realtime_coarse
+        self.original_tv_realtime_coarse = time.realtime_coarse
         assert(self.original_tv_realtime_coarse ~= nil)
     end
     if self.original_tv_monotonic == nil then
-        self.original_tv_monotonic = TimeVal.monotonic
+        self.original_tv_monotonic = time.monotonic
         assert(self.original_tv_monotonic ~= nil)
     end
     if self.original_tv_monotonic_coarse == nil then
-        self.original_tv_monotonic_coarse = TimeVal.monotonic_coarse
+        self.original_tv_monotonic_coarse = time.monotonic_coarse
         assert(self.original_tv_monotonic_coarse ~= nil)
     end
     if self.original_tv_boottime == nil then
-        self.original_tv_boottime = TimeVal.boottime
+        self.original_tv_boottime = time.boottime
         assert(self.original_tv_boottime ~= nil)
     end
     if self.original_tv_boottime_or_realtime_coarse == nil then
-        self.original_tv_boottime_or_realtime_coarse = TimeVal.boottime_or_realtime_coarse
+        self.original_tv_boottime_or_realtime_coarse = time.boottime_or_realtime_coarse
         assert(self.original_tv_boottime_or_realtime_coarse ~= nil)
     end
     if self.original_tv_now == nil then
-        self.original_tv_now = TimeVal.now
+        self.original_tv_now = time.now
         assert(self.original_tv_now ~= nil)
     end
 
@@ -77,33 +75,33 @@ function MockTime:install()
         logger.dbg("MockTime:util.gettime: ", self.realtime)
         return self.realtime, 0
     end
-    TimeVal.realtime = function()
-        logger.dbg("MockTime:TimeVal.realtime: ", self.realtime)
-        return TimeVal:new{ sec = self.realtime }
+    time.realtime = function()
+        logger.dbg("MockTime:Time.realtime: ", self.realtime)
+        return time:new{ sec = self.realtime }
     end
-    TimeVal.realtime_coarse = function()
-        logger.dbg("MockTime:TimeVal.realtime_coarse: ", self.realtime)
-        return TimeVal:new{ sec = self.realtime }
+    time.realtime_coarse = function()
+        logger.dbg("MockTime:Time.realtime_coarse: ", self.realtime)
+        return time:new{ sec = self.realtime }
     end
-    TimeVal.monotonic = function()
-        logger.dbg("MockTime:TimeVal.monotonic: ", self.monotonic)
-        return TimeVal:new{ sec = self.monotonic }
+    time.monotonic = function()
+        logger.dbg("MockTime:Time.monotonic: ", self.monotonic)
+        return time:new{ sec = self.monotonic }
     end
-    TimeVal.monotonic_coarse = function()
-        logger.dbg("MockTime:TimeVal.monotonic_coarse: ", self.monotonic)
-        return TimeVal:new{ sec = self.monotonic }
+    time.monotonic_coarse = function()
+        logger.dbg("MockTime:Time.monotonic_coarse: ", self.monotonic)
+        return time:new{ sec = self.monotonic }
     end
-    TimeVal.boottime = function()
-        logger.dbg("MockTime:TimeVal.boottime: ", self.boottime)
-        return TimeVal:new{ sec = self.boottime }
+    time.boottime = function()
+        logger.dbg("MockTime:Time.boottime: ", self.boottime)
+        return time:new{ sec = self.boottime }
     end
-    TimeVal.boottime_or_realtime_coarse = function()
-        logger.dbg("MockTime:TimeVal.boottime: ", self.boottime_or_realtime_coarse)
-        return TimeVal:new{ sec = self.boottime_or_realtime_coarse }
+    time.boottime_or_realtime_coarse = function()
+        logger.dbg("MockTime:Time.boottime: ", self.boottime_or_realtime_coarse)
+        return time:new{ sec = self.boottime_or_realtime_coarse }
     end
-    TimeVal.now = function()
-        logger.dbg("MockTime:TimeVal.now: ", self.monotonic)
-        return TimeVal:new{ sec = self.monotonic }
+    time.now = function()
+        logger.dbg("MockTime:Time.now: ", self.monotonic)
+        return time:new{ sec = self.monotonic }
     end
 
     if self.original_tv_realtime_time == nil then
@@ -142,67 +140,65 @@ function MockTime:install()
     self.monotonic = tonumber(timespec.tv_sec) * 1e6
 
     time.realtime = function()
-        logger.dbg("MockTime:TimeVal.realtime: ", self.realtime_time)
+        logger.dbg("MockTime:Time.realtime: ", self.realtime_time)
         return self.realtime_time
     end
     time.realtime_coarse = function()
-        logger.dbg("MockTime:TimeVal.realtime_coarse: ", self.realtime_coarse_time)
+        logger.dbg("MockTime:Time.realtime_coarse: ", self.realtime_coarse_time)
         return self.realtime_coarse_time
     end
     time.monotonic = function()
-        logger.dbg("MockTime:TimeVal.monotonic: ", self.monotonic)
+        logger.dbg("MockTime:Time.monotonic: ", self.monotonic)
         return self.monotonic_time
     end
     time.monotonic_coarse = function()
-        logger.dbg("MockTime:TimeVal.monotonic_coarse: ", self.monotonic)
+        logger.dbg("MockTime:Time.monotonic_coarse: ", self.monotonic)
         return self.monotonic_time
     end
     time.boottime = function()
-        logger.dbg("MockTime:TimeVal.boottime: ", self.boottime_time)
+        logger.dbg("MockTime:Time.boottime: ", self.boottime_time)
         return self.boottime_time
     end
     time.boottime_or_realtime_coarse = function()
-        logger.dbg("MockTime:TimeVal.boottime: ", self.boottime_or_realtime_coarse_time)
+        logger.dbg("MockTime:Time.boottime: ", self.boottime_or_realtime_coarse_time)
         return self.boottime_or_realtime_coarse_time
     end
     time.now = function()
-        logger.dbg("MockTime:TimeVal.now: ", self.monotonic)
+        logger.dbg("MockTime:Time.now: ", self.monotonic)
         return self.monotonic_time
     end
 
  end
 
 function MockTime:uninstall()
-    assert(self ~= nil)
     os.time = self.original_os_time --luacheck: ignore
     if self.original_util_time ~= nil then
         util.gettime = self.original_util_time
     end
     if self.original_tv_realtime ~= nil then
-        TimeVal.realtime = self.original_tv_realtime
+        time.realtime = self.original_tv_realtime
     end
     if self.original_tv_realtime_coarse ~= nil then
-        TimeVal.realtime_coarse = self.original_tv_realtime_coarse
+        time.realtime_coarse = self.original_tv_realtime_coarse
     end
     if self.original_tv_monotonic ~= nil then
-        TimeVal.monotonic = self.original_tv_monotonic
+        time.monotonic = self.original_tv_monotonic
     end
     if self.original_tv_monotonic_coarse ~= nil then
-        TimeVal.monotonic_coarse = self.original_tv_monotonic_coarse
+        time.monotonic_coarse = self.original_tv_monotonic_coarse
     end
     if self.original_tv_boottime ~= nil then
-        TimeVal.boottime = self.original_tv_boottime
+        time.boottime = self.original_tv_boottime
     end
     if self.original_tv_boottime_or_realtime_coarse ~= nil then
-        TimeVal.boottime_or_realtime_coarse = self.original_tv_boottime_or_realtime_coarse
+        time.boottime_or_realtime_coarse = self.original_tv_boottime_or_realtime_coarse
     end
     if self.original_tv_now ~= nil then
-        TimeVal.now = self.original_tv_now
+        time.now = self.original_tv_now
     end
 end
 
 function MockTime:set_realtime(value)
-    assert(self ~= nil)
     if type(value) ~= "number" then
         return false
     end
@@ -212,7 +208,6 @@ function MockTime:set_realtime(value)
 end
 
 function MockTime:increase_realtime(value)
-    assert(self ~= nil)
     if type(value) ~= "number" then
         return false
     end
@@ -222,7 +217,6 @@ function MockTime:increase_realtime(value)
 end
 
 function MockTime:set_monotonic(value)
-    assert(self ~= nil)
     if type(value) ~= "number" then
         return false
     end
@@ -232,7 +226,6 @@ function MockTime:set_monotonic(value)
 end
 
 function MockTime:increase_monotonic(value)
-    assert(self ~= nil)
     if type(value) ~= "number" then
         return false
     end
@@ -242,7 +235,6 @@ function MockTime:increase_monotonic(value)
 end
 
 function MockTime:set_boottime(value)
-    assert(self ~= nil)
     if type(value) ~= "number" then
         return false
     end
@@ -252,7 +244,6 @@ function MockTime:set_boottime(value)
 end
 
 function MockTime:increase_boottime(value)
-    assert(self ~= nil)
     if type(value) ~= "number" then
         return false
     end
@@ -262,7 +253,6 @@ function MockTime:increase_boottime(value)
 end
 
 function MockTime:set_boottime_or_realtime_coarse(value)
-    assert(self ~= nil)
     if type(value) ~= "number" then
         return false
     end
@@ -272,7 +262,6 @@ function MockTime:set_boottime_or_realtime_coarse(value)
 end
 
 function MockTime:increase_boottime_or_realtime_coarse(value)
-    assert(self ~= nil)
     if type(value) ~= "number" then
         return false
     end
@@ -282,7 +271,6 @@ function MockTime:increase_boottime_or_realtime_coarse(value)
 end
 
 function MockTime:set(value)
-    assert(self ~= nil)
     if type(value) ~= "number" then
         return false
     end
@@ -298,7 +286,6 @@ function MockTime:set(value)
 end
 
 function MockTime:increase(value)
-    assert(self ~= nil)
     if type(value) ~= "number" then
         return false
     end

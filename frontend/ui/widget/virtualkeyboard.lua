@@ -31,7 +31,7 @@ local DEFAULT_LABEL_SIZE = 22
 
 local VirtualKeyPopup
 
-local VirtualKey = InputContainer:new{
+local VirtualKey = InputContainer:extend{
     key = nil,
     icon = nil,
     label = nil,
@@ -51,6 +51,10 @@ local VirtualKey = InputContainer:new{
     face = Font:getFace("infont"),
 }
 
+-- For caps lock, it's necessary because after setLayout, the new shift key is no longer the same virtual key
+-- thus rendering its preset .ignore_key_release property useless
+local ignore_key_release
+
 function VirtualKey:init()
     local label_font_size = G_reader_settings:readSetting("keyboard_key_font_size", DEFAULT_LABEL_SIZE)
     self.face = Font:getFace("infont", label_font_size)
@@ -58,12 +62,24 @@ function VirtualKey:init()
     if self.keyboard.symbolmode_keys[self.label] ~= nil then
         self.callback = function () self.keyboard:setLayer("Sym") end
         self.skiptap = true
-    elseif self.keyboard.shiftmode_keys[self.label] ~= nil then
-        self.callback = function () self.keyboard:setLayer("Shift") end
+    elseif self.keyboard.shiftmode_keys[self.label] ~= nil or self.keyboard.shiftmode_keys[self.key] ~= nil then
+        -- self.key needed because the shift key's label could be the capslock instead of the shift
+        local key = self.key or self.label
+        local releasable = key == ""
+        self.callback = function()
+            self.keyboard.release_shift = releasable
+            self.keyboard:setLayer("Shift")
+        end
+        self.hold_callback = function()
+            ignore_key_release = true
+            if releasable then self.keyboard.release_shift = false end
+            self.keyboard:setLayer("Shift")
+        end
         self.skiptap = true
     elseif self.keyboard.utf8mode_keys[self.label] ~= nil then
         self.key_chars = self:genKeyboardLayoutKeyChars()
         self.callback = function ()
+            self.keyboard:onSwitchingKeyboardLayout()
             local current = G_reader_settings:readSetting("keyboard_layout")
             local default = G_reader_settings:readSetting("keyboard_layout_default")
             local keyboard_layouts = G_reader_settings:readSetting("keyboard_layouts", {})
@@ -86,6 +102,7 @@ function VirtualKey:init()
             self.keyboard:setKeyboardLayout(next_layout)
         end
         self.hold_callback = function()
+            self.keyboard:onSwitchingKeyboardLayout()
             if util.tableSize(self.key_chars) > 5 then -- 2 or more layouts enabled
                 self.popup = VirtualKeyPopup:new{
                     parent_key = self,
@@ -100,6 +117,7 @@ function VirtualKey:init()
         end
         self.hold_cb_is_popup = true
         self.swipe_callback = function(ges)
+            self.keyboard:onSwitchingKeyboardLayout()
             local key_function = self.key_chars[ges.direction.."_func"]
             if key_function then
                 key_function()
@@ -141,7 +159,15 @@ function VirtualKey:init()
             self.keyboard:scrollDown()
         end
     else
-        self.callback = function () self.keyboard:addChar(self.key) end
+        self.callback = function()
+            self.keyboard:addChar(self.key)
+            if self.close_after_callback_widget then
+                UIManager:close(self.close_after_callback_widget)
+            end
+            if self.keyboard.shiftmode and not self.keyboard.symbolmode and self.keyboard.release_shift then
+                self.keyboard:setLayer("Shift")
+            end
+        end
         self.hold_callback = function()
             if not self.key_chars then return end
 
@@ -276,7 +302,7 @@ function VirtualKey:init()
             },
         },
     }
-    if (self.keyboard.shiftmode_keys[self.label] ~= nil  and self.keyboard.shiftmode) or
+    if ((self.keyboard.shiftmode_keys[self.label] ~= nil or self.keyboard.shiftmode_keys[self.key])  and self.keyboard.shiftmode) or
         (self.keyboard.umlautmode_keys[self.label] ~= nil and self.keyboard.umlautmode) or
         (self.keyboard.symbolmode_keys[self.label] ~= nil and self.keyboard.symbolmode) then
         self[1].background = Blitbuffer.COLOR_LIGHT_GRAY
@@ -316,24 +342,28 @@ function VirtualKey:genKeyboardLayoutKeyChars()
 end
 
 -- NOTE: We currently don't ever set want_flash to true (c.f., our invert method).
-function VirtualKey:update_keyboard(want_flash, want_fast)
-    -- NOTE: We mainly use "fast" when inverted & "ui" when not, with a cherry on top:
-    --       we flash the *full* keyboard instead when we release a hold.
+function VirtualKey:update_keyboard(want_flash, want_a2)
+    -- NOTE: We use "a2" for the highlights.
+    --       We flash the *full* keyboard when we release a hold.
     if want_flash then
         UIManager:setDirty(self.keyboard, function()
             return "flashui", self.keyboard[1][1].dimen
         end)
     else
         local refresh_type = "ui"
-        if want_fast then
-            refresh_type = "fast"
+        if want_a2 then
+            refresh_type = "a2"
         end
         -- Only repaint the key itself, not the full board...
         UIManager:widgetRepaint(self[1], self[1].dimen.x, self[1].dimen.y)
-        UIManager:setDirty(nil, function()
-            logger.dbg("update key region", self[1].dimen)
-            return refresh_type, self[1].dimen
-        end)
+        logger.dbg("update key", self.key)
+        UIManager:setDirty(nil, refresh_type, self[1].dimen)
+
+        -- NOTE: On MTK, we'd have to forcibly stall a bit for the highlights to actually show.
+        --[[
+        UIManager:forceRePaint()
+        UIManager:yieldToEPDC(3000)
+        --]]
     end
 end
 
@@ -412,6 +442,10 @@ function VirtualKey:onSwipeKey(arg, ges)
 end
 
 function VirtualKey:onHoldReleaseKey()
+    if ignore_key_release then
+        ignore_key_release = nil
+        return true
+    end
     if self.ignore_key_release then
         self.ignore_key_release = nil
         return true
@@ -446,14 +480,14 @@ function VirtualKey:invert(invert, hold)
     else
         self[1].inner_bordersize = 0
     end
-    self:update_keyboard(hold, false)
+    self:update_keyboard(hold, true)
 end
 
-VirtualKeyPopup = FocusManager:new{
+VirtualKeyPopup = FocusManager:extend{
     modal = true,
     disable_double_tap = true,
     inputbox = nil,
-    layout = {},
+    layout = nil, -- array
 }
 
 function VirtualKeyPopup:onTapClose(arg, ges)
@@ -482,6 +516,7 @@ function VirtualKeyPopup:init()
     local key_char_orig = key_chars[1]
     local key_char_orig_func = parent_key.callback
 
+    self.layout = {}
     local rows = {
         extra_key_chars = {
             key_chars[2],
@@ -569,6 +604,7 @@ function VirtualKeyPopup:init()
                     key_chars = key_chars,
                     width = parent_key.width,
                     height = parent_key.height,
+                    close_after_callback_widget = self,
                 }
                 -- Support any function as a callback.
                 if v_func then
@@ -658,17 +694,15 @@ function VirtualKeyPopup:init()
     }
     keyboard_frame.dimen = keyboard_frame:getSize()
 
-    self.ges_events = {
-        TapClose = {
-            GestureRange:new{
-                ges = "tap",
-            }
-        },
+    self.ges_events.TapClose = {
+        GestureRange:new{
+            ges = "tap",
+        }
     }
     self.tap_interval_override = time.ms(G_reader_settings:readSetting("ges_tap_interval_on_keyboard_ms", 0))
 
     if Device:hasKeys() then
-        self.key_events.Close = { {Device.input.group.Back}, doc = "close keyboard" }
+        self.key_events.Close = { { Device.input.group.Back } }
     end
 
     local offset_x = 2*keyboard_frame.bordersize + keyboard_frame.padding + parent_key.keyboard.key_padding
@@ -719,21 +753,22 @@ function VirtualKeyPopup:init()
     end)
 end
 
-local VirtualKeyboard = FocusManager:new{
+local VirtualKeyboard = FocusManager:extend{
     name = "VirtualKeyboard",
+    covers_footer = true,
     modal = true,
     disable_double_tap = true,
     inputbox = nil,
-    KEYS = {}, -- table to store layouts
-    shiftmode_keys = {},
-    symbolmode_keys = {},
-    utf8mode_keys = {},
-    umlautmode_keys = {},
+    KEYS = nil, -- table to store layouts
+    shiftmode_keys = nil, -- table
+    symbolmode_keys = nil, -- table
+    utf8mode_keys = nil, -- table
+    umlautmode_keys = nil, -- table
     keyboard_layer = 2,
     shiftmode = false,
     symbolmode = false,
     umlautmode = false,
-    layout = {},
+    layout = nil, -- array
 
     height = nil,
     keys_height = nil,
@@ -743,7 +778,7 @@ local VirtualKeyboard = FocusManager:new{
     key_padding = Size.padding.small,
 
     lang_to_keyboard_layout = {
-        ar_AA = "ar_AA_keyboard",
+        ar = "ar_keyboard",
         bg_BG = "bg_keyboard",
         bn = "bn_keyboard",
         de = "de_keyboard",
@@ -755,16 +790,23 @@ local VirtualKeyboard = FocusManager:new{
         he = "he_keyboard",
         ja = "ja_keyboard",
         ka = "ka_keyboard",
+        ko_KR = "ko_KR_keyboard",
         pl = "pl_keyboard",
         pt_BR = "pt_keyboard",
         ro = "ro_keyboard",
-        ko_KR = "ko_KR_keyboard",
         ru = "ru_keyboard",
+        sk = "sk_keyboard",
+        th = "th_keyboard",
         tr = "tr_keyboard",
+        vi = "vi_keyboard",
+        zh = "zh_keyboard",
+        zh_CN = "zh_CN_keyboard",
     },
 
     lang_has_submenu = {
         ja = true,
+        zh = true,
+        zh_CN = true,
     },
 }
 
@@ -776,11 +818,11 @@ function VirtualKeyboard:init()
     local lang = self:getKeyboardLayout()
     local keyboard_layout = self.lang_to_keyboard_layout[lang] or self.lang_to_keyboard_layout["en"]
     local keyboard = require("ui/data/keyboardlayouts/" .. keyboard_layout)
-    self.KEYS = keyboard.keys
-    self.shiftmode_keys = keyboard.shiftmode_keys
-    self.symbolmode_keys = keyboard.symbolmode_keys
-    self.utf8mode_keys = keyboard.utf8mode_keys
-    self.umlautmode_keys = keyboard.umlautmode_keys
+    self.KEYS = keyboard.keys or {}
+    self.shiftmode_keys = keyboard.shiftmode_keys or {}
+    self.symbolmode_keys = keyboard.symbolmode_keys or {}
+    self.utf8mode_keys = keyboard.utf8mode_keys or {}
+    self.umlautmode_keys = keyboard.umlautmode_keys or {}
     self.width = Screen:getWidth()
     local keys_height = self.keys_height and self.keys_height or (G_reader_settings:isTrue("keyboard_key_compact") and 48 or 64)
 
@@ -790,7 +832,7 @@ function VirtualKeyboard:init()
     self:initLayer(self.keyboard_layer)
     self.tap_interval_override = time.ms(G_reader_settings:readSetting("ges_tap_interval_on_keyboard_ms", 0))
     if Device:hasKeys() then
-        self.key_events.Close = { {"Back"}, doc = "close keyboard" }
+        self.key_events.Close = { { "Back" } }
     end
     if keyboard.wrapInputBox then
         self.uwrap_func = keyboard.wrapInputBox(self.inputbox) or self.uwrap_func
@@ -949,6 +991,10 @@ function VirtualKeyboard:addKeys()
                             - self.key_padding
             local key_height = base_key_height
             label = label or self.KEYS[i][j].label or key
+            if label == "" and self.shiftmode and (not self.release_shift or self.symbolmode) then
+                key = label
+                label = "" -- capslock symbol
+            end
             local virtual_key = VirtualKey:new{
                 key = key,
                 key_chars = key_chars,
@@ -1035,6 +1081,11 @@ end
 
 function VirtualKeyboard:goToStartOfLine()
     self.inputbox:goToStartOfLine()
+end
+
+-- Some keyboard with intermediate state (ie. zh) may need to be notified
+function VirtualKeyboard:onSwitchingKeyboardLayout()
+    if self.inputbox.onSwitchingKeyboardLayout then self.inputbox:onSwitchingKeyboardLayout() end
 end
 
 function VirtualKeyboard:goToEndOfLine()

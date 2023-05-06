@@ -1,3 +1,7 @@
+--[[--
+A button table to be used in dialogs and widgets.
+]]
+
 local Blitbuffer = require("ffi/blitbuffer")
 local CheckButton = require("ui/widget/checkbutton")
 local Device = require("device")
@@ -12,7 +16,7 @@ local VerticalSpan = require("ui/widget/verticalspan")
 local dbg = require("dbg")
 local Screen = Device.screen
 
-local RadioButtonTable = FocusManager:new{
+local RadioButtonTable = FocusManager:extend{
     width = Screen:getWidth(),
     radio_buttons = {
         {

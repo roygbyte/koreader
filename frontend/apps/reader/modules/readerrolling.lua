@@ -9,6 +9,7 @@ local ReaderPanning = require("apps/reader/modules/readerpanning")
 local Size = require("ui/size")
 local UIManager = require("ui/uimanager")
 local bit = require("bit")
+local lfs = require("libs/libkoreader-lfs")
 local logger = require("logger")
 local time = require("ui/time")
 local _ = require("gettext")
@@ -38,12 +39,12 @@ local band = bit.band
     it in explicit page turning. And use that xpointer for non-page-turning
     rendering.
 --]]
-local ReaderRolling = InputContainer:new{
+local ReaderRolling = InputContainer:extend{
     pan_rate = 30,  -- default 30 ops, will be adjusted in readerui
     rendering_hash = 0,
     current_pos = 0,
     -- only used for page view mode
-    current_page= nil,
+    current_page = nil,
     xpointer = nil,
     panning_steps = ReaderPanning.panning_steps,
     cre_top_bar_enabled = false,
@@ -56,63 +57,7 @@ local ReaderRolling = InputContainer:new{
 }
 
 function ReaderRolling:init()
-    self.key_events = {}
-    if Device:hasKeys() then
-        self.key_events.GotoNextView = {
-            { {"RPgFwd", "LPgFwd", "Right" } },
-            doc = "go to next view",
-            event = "GotoViewRel", args = 1,
-        }
-        self.key_events.GotoPrevView = {
-            { { "RPgBack", "LPgBack", "Left" } },
-            doc = "go to previous view",
-            event = "GotoViewRel", args = -1,
-        }
-    end
-    if Device:hasDPad() then
-        self.key_events.MoveUp = {
-            { "Up" },
-            doc = "move view up",
-            event = "Panning", args = {0, -1},
-        }
-        self.key_events.MoveDown = {
-            { "Down" },
-            doc = "move view down",
-            event = "Panning", args = {0,  1},
-        }
-    end
-    if Device:hasKeyboard() then
-        self.key_events.GotoFirst = {
-            {"1"}, doc = "go to start", event = "GotoPercent", args = 0,
-        }
-        self.key_events.Goto11 = {
-            {"2"}, doc = "go to 11%", event = "GotoPercent", args = 11,
-        }
-        self.key_events.Goto22 = {
-            {"3"}, doc = "go to 22%", event = "GotoPercent", args = 22,
-        }
-        self.key_events.Goto33 = {
-            {"4"}, doc = "go to 33%", event = "GotoPercent", args = 33,
-        }
-        self.key_events.Goto44 = {
-            {"5"}, doc = "go to 44%", event = "GotoPercent", args = 44,
-        }
-        self.key_events.Goto55 = {
-            {"6"}, doc = "go to 55%", event = "GotoPercent", args = 55,
-        }
-        self.key_events.Goto66 = {
-            {"7"}, doc = "go to 66%", event = "GotoPercent", args = 66,
-        }
-        self.key_events.Goto77 = {
-            {"8"}, doc = "go to 77%", event = "GotoPercent", args = 77,
-        }
-        self.key_events.Goto88 = {
-            {"9"}, doc = "go to 88%", event = "GotoPercent", args = 88,
-        }
-        self.key_events.GotoLast = {
-            {"0"}, doc = "go to end", event = "GotoPercent", args = 100,
-        }
-    end
+    self:registerKeyEvents()
     self.pan_interval = time.s(1 / self.pan_rate)
 
     table.insert(self.ui.postInitCallback, function()
@@ -126,7 +71,94 @@ function ReaderRolling:init()
         self:onRedrawCurrentView()
     end)
     self.ui.menu:registerToMainMenu(self)
+    self.batched_update_count = 0
+
+    -- delegate gesture listener to readerui, NOP our own
+    self.ges_events = nil
 end
+
+function ReaderRolling:onGesture() end
+
+function ReaderRolling:registerKeyEvents()
+    if Device:hasKeys() then
+        self.key_events.GotoNextView = {
+            { { "RPgFwd", "LPgFwd", "Right" } },
+            event = "GotoViewRel",
+            args = 1,
+        }
+        self.key_events.GotoPrevView = {
+            { { "RPgBack", "LPgBack", "Left" } },
+            event = "GotoViewRel",
+            args = -1,
+        }
+    end
+    if Device:hasDPad() then
+        self.key_events.MoveUp = {
+            { "Up" },
+            event = "Panning",
+            args = {0, -1},
+        }
+        self.key_events.MoveDown = {
+            { "Down" },
+            event = "Panning",
+            args = {0,  1},
+        }
+    end
+    if Device:hasKeyboard() then
+        self.key_events.GotoFirst = {
+            { "1" },
+            event = "GotoPercent",
+            args = 0,
+        }
+        self.key_events.Goto11 = {
+            { "2" },
+            event = "GotoPercent",
+            args = 11,
+        }
+        self.key_events.Goto22 = {
+            { "3" },
+            event = "GotoPercent",
+            args = 22,
+        }
+        self.key_events.Goto33 = {
+            { "4" },
+            event = "GotoPercent",
+            args = 33,
+        }
+        self.key_events.Goto44 = {
+            { "5" },
+            event = "GotoPercent",
+            args = 44,
+        }
+        self.key_events.Goto55 = {
+            { "6" },
+            event = "GotoPercent",
+            args = 55,
+        }
+        self.key_events.Goto66 = {
+            { "7" },
+            event = "GotoPercent",
+            args = 66,
+        }
+        self.key_events.Goto77 = {
+            { "8" },
+            event = "GotoPercent",
+            args = 77,
+        }
+        self.key_events.Goto88 = {
+            { "9" },
+            event = "GotoPercent",
+            args = 88,
+        }
+        self.key_events.GotoLast = {
+            { "0" },
+            event = "GotoPercent",
+            args = 100,
+        }
+    end
+end
+
+ReaderRolling.onPhysicalKeyboardConnected = ReaderRolling.registerKeyEvents
 
 function ReaderRolling:onReadSettings(config)
     -- 20180503: some fix in crengine has changed the way the DOM is built
@@ -152,6 +184,7 @@ function ReaderRolling:onReadSettings(config)
     self.ui.document:requestDomVersion(config:readSetting("cre_dom_version"))
     -- If we're using a DOM version without normalized XPointers, some stuff
     -- may need tweaking:
+    local cre = require("document/credocument"):engineInit()
     if config:readSetting("cre_dom_version") < cre.getDomVersionWithNormalizedXPointers() then
         -- Show some warning when styles "display:" have changed that
         -- bookmarks may break
@@ -308,8 +341,6 @@ function ReaderRolling:onReaderReady()
 end
 
 function ReaderRolling:setupTouchZones()
-    self.ges_events = {}
-    self.onGesture = nil
     if not Device:isTouchDevice() then return end
 
     local forward_zone, backward_zone = self.view:getTapZones()
@@ -694,7 +725,7 @@ function ReaderRolling:onGotoXPointer(xp, marker_xp)
         -- where xpointer target is (and remove if after 1s)
         local screen_y, screen_x = self.ui.document:getScreenPositionFromXPointer(marker_xp)
         local doc_margins = self.ui.document:getPageMargins()
-        local marker_h = Screen:scaleBySize(self.ui.font.font_size * 1.1 * self.ui.font.line_space_percent/100.0)
+        local marker_h = Screen:scaleBySize(self.ui.font.font_size * 1.1 * self.ui.font.line_space_percent * (1/100))
         -- Make it 4/5 of left margin wide (and bigger when huge margin)
         local marker_w = math.floor(math.max(doc_margins["left"] - Screen:scaleBySize(5), doc_margins["left"] * 4/5))
 
@@ -785,14 +816,14 @@ function ReaderRolling:onRestoreBookLocation(saved_location)
 end
 
 function ReaderRolling:onGotoViewRel(diff)
-    logger.dbg("goto relative screen:", diff, ", in mode: ", self.view.view_mode)
+    logger.dbg("goto relative screen:", diff, ", in mode:", self.view.view_mode)
     if self.view.view_mode == "scroll" then
         local footer_height = ((self.view.footer_visible and not self.view.footer.settings.reclaim_height) and 1 or 0) * self.view.footer:getHeight()
         local page_visible_height = self.ui.dimen.h - footer_height
         local pan_diff = diff * page_visible_height
         if self.view.page_overlap_enable then
             local overlap_lines = G_reader_settings:readSetting("copt_overlap_lines") or 1
-            local overlap_h = Screen:scaleBySize(self.ui.font.font_size * 1.1 * self.ui.font.line_space_percent/100.0) * overlap_lines
+            local overlap_h = Screen:scaleBySize(self.ui.font.font_size * 1.1 * self.ui.font.line_space_percent * (1/100)) * overlap_lines
             if pan_diff > overlap_h then
                 pan_diff = pan_diff - overlap_h
             elseif pan_diff < -overlap_h then
@@ -857,12 +888,35 @@ function ReaderRolling:onZoom()
     self:updatePos()
 end
 
+function ReaderRolling:onBatchedUpdate()
+    -- This is called by Dispatcher, and it may be possible to have re-entrant calls
+    self.batched_update_count = self.batched_update_count + 1
+end
+
+function ReaderRolling:onBatchedUpdateDone()
+    self.batched_update_count = self.batched_update_count - 1
+    if self.batched_update_count <= 0 then
+        self.batched_update_count = 0
+        -- Be sure any Notification gets a chance to be painted before
+        -- a blocking rerendering
+        UIManager:nextTick(function()
+            self:onUpdatePos()
+        end)
+    end
+end
+
 --[[
-    remember to signal this event when the document has been zoomed,
-    font has been changed, or line height has been changed.
+    remember to signal this event when the document layout could
+    have changed (ie. font, line height, margin... change)
     Note that xpointer should not be changed.
+    The only handler of this event should be this one.
+    A "DocumentRerendered" event will be then sent if it has changed.
+    Provide force=true to get it emitted even if nothing has changed.
 --]]
-function ReaderRolling:onUpdatePos()
+function ReaderRolling:onUpdatePos(force)
+    if self.batched_update_count > 0 then
+        return
+    end
     if self.ui.postReaderCallback ~= nil then -- ReaderUI:init() not yet done
         -- Don't schedule any updatePos as long as ReaderUI:init() is
         -- not finished (one will be called in the ui.postReaderCallback
@@ -883,7 +937,7 @@ function ReaderRolling:onUpdatePos()
     -- previously because of some bad setDirty() in ConfigDialog widgets
     -- that were triggering a full repaint of crengine (so, the needed
     -- rerendering) before updatePos() is called.
-    self:updatePos()
+    self:updatePos(force)
 
     Device:setIgnoreInput(false) -- Allow processing of events (on Android).
     Input:inhibitInputUntil(0.2) -- Discard input events, which might have occurred (double tap).
@@ -891,24 +945,26 @@ function ReaderRolling:onUpdatePos()
     -- to allow for quicker setting changes and rendering comparisons.
 end
 
-function ReaderRolling:updatePos()
+function ReaderRolling:updatePos(force)
     if not self.ui.document then
         -- document closed since we were scheduleIn'ed
         return
     end
     -- Check if the document has been re-rendered
     local new_rendering_hash = self.ui.document:getDocumentRenderingHash()
-    if new_rendering_hash ~= self.rendering_hash then
+    if new_rendering_hash ~= self.rendering_hash or force then
         logger.dbg("rendering hash changed:", self.rendering_hash, ">", new_rendering_hash)
         self.rendering_hash = new_rendering_hash
         -- A few things like page numbers may have changed
         self.ui.document:resetCallCache() -- be really sure this cache is reset
         self.ui.document:_readMetadata() -- get updated document height and nb of pages
-        if self.hide_nonlinear_flows then
+        if self.hide_nonlinear_flows or force then
             self.ui.document:cacheFlows()
         end
+        -- Note: ReaderStatistics needs to get these in this order
+        -- ("PageUpdate" event first, and then "DocumentRerendered").
         self:_gotoXPointer(self.xpointer)
-        self.ui:handleEvent(Event:new("UpdateToc"))
+        self.ui:handleEvent(Event:new("DocumentRerendered"))
     end
     self:onUpdateTopStatusBarMarkers()
     UIManager:setDirty(self.view.dialog, "partial")
@@ -928,7 +984,7 @@ function ReaderRolling:onChangeViewMode()
         if self.visible_pages == 2 then
             -- Switching from 2-pages page mode to scroll mode has crengine switch to 1-page,
             -- and we need to notice this re-rendering and keep things sane
-            self.ui:handleEvent(Event:new("UpdatePos"))
+            self:onUpdatePos()
         end
         self:_gotoXPointer(self.xpointer)
         -- Ensure a whole screen refresh is always enqueued
@@ -1021,9 +1077,9 @@ end
 
 function ReaderRolling:_gotoPercent(new_percent)
     if self.view.view_mode == "page" then
-        self:_gotoPage(new_percent * self.ui.document:getPageCount() / 100)
+        self:_gotoPage(new_percent * self.ui.document:getPageCount() * (1/100))
     else
-        self:_gotoPos(new_percent * self.ui.document.info.doc_height / 100)
+        self:_gotoPos(new_percent * self.ui.document.info.doc_height * (1/100))
     end
 end
 
@@ -1088,7 +1144,7 @@ function ReaderRolling:onSetVisiblePages(visible_pages)
     self.ui.document:setVisiblePageCount(visible_pages)
     local cur_visible_pages = self.ui.document:getVisiblePageCount()
     if cur_visible_pages ~= prev_visible_pages then
-        self.ui:handleEvent(Event:new("UpdatePos"))
+        self:onUpdatePos()
     end
 end
 
@@ -1100,7 +1156,7 @@ function ReaderRolling:onSetStatusLine(status_line)
     -- (We used to toggle the footer when toggling the top status bar,
     -- but people seem to like having them both, and it feels more
     -- practicable to have the independant.)
-    self.ui:handleEvent(Event:new("UpdatePos"))
+    self:onUpdatePos()
 end
 
 function ReaderRolling:onUpdateTopStatusBarMarkers()
@@ -1143,34 +1199,35 @@ function ReaderRolling:updateBatteryState()
 end
 
 function ReaderRolling:handleEngineCallback(ev, ...)
-    local args = {...}
-    -- logger.info("handleCallback: got", ev, args and #args > 0 and args[1] or nil)
+    local argc = select("#", ...)
+    local arg = argc > 0 and select(1, ...)
+    -- logger.info("handleCallback: got", ev, ...)
     if ev == "OnLoadFileStart" then -- Start of book loading
         self:showEngineProgress(0) -- Start initial delay countdown
     elseif ev == "OnLoadFileProgress" then
         -- Initial load from file (step 1/2) or from cache (step 1/1)
-        self:showEngineProgress(args[1]/100/2)
+        self:showEngineProgress(arg*(1/100/2))
     elseif ev == "OnNodeStylesUpdateStart" then -- Start of re-rendering
         self:showEngineProgress(0) -- Start initial delay countdown
     elseif ev == "OnNodeStylesUpdateProgress" then
         -- Update node styles (step 1/2 on re-rendering)
-        self:showEngineProgress(args[1]/100/2)
+        self:showEngineProgress(arg*(1/100/2))
     elseif ev == "OnFormatStart" then -- Start of step 2/2
         self:showEngineProgress(1/2) -- 50%, in case of no OnFormatProgress
     elseif ev == "OnFormatProgress" then
         -- Paragraph formatting and page splitting (step 2/2 after load
         -- from file, step 2/2 on re-rendering)
-        self:showEngineProgress(1/2 + args[1]/100/2)
+        self:showEngineProgress(1/2 + arg*(1/100/2))
     elseif ev == "OnSaveCacheFileStart" then -- Start of cache file save
         self:showEngineProgress(1) -- Start initial delay countdown, fully filled
     elseif ev == "OnSaveCacheFileProgress" then
         -- Cache file save (when closing book after initial load from
         -- file or re-rendering)
-        self:showEngineProgress(1 - args[1]/100) -- unfill progress
+        self:showEngineProgress(1 - arg*(1/100)) -- unfill progress
     elseif ev == "OnDocumentReady" or ev == "OnSaveCacheFileEnd" then
         self:showEngineProgress() -- cleanup
     elseif ev == "OnLoadFileError" then
-        logger.warn("Cre error loading file:", args[1])
+        logger.warn("Cre error loading file:", arg)
     end
     -- ignore other events
 end
@@ -1212,7 +1269,7 @@ function ReaderRolling:showEngineProgress(percent)
             y = y + self.current_header_height
         end
 
-        local w = math.floor(Screen:getWidth() / 3)
+        local w = math.floor(Screen:getWidth() * (1/3))
         local h = Size.line.progress
         if self.engine_progress_widget then
             self.engine_progress_widget:setPercentage(percent)
@@ -1473,13 +1530,12 @@ function ReaderRolling:onToggleHideNonlinear()
     self.ui.document:setHideNonlinearFlows(self.hide_nonlinear_flows)
     -- The document may change due to forced pagebreaks between flows being
     -- added or removed, so we need to find our location
-    self:onUpdatePos()
     -- Even if the document doesn't change, we must ensure that the
     -- flow and call caches are cleared, to get the right page numbers,
     -- which may have changed, and the correct flow structure. Also,
     -- the footer needs updating, and TOC markers may come or go.
-    self.ui.document:cacheFlows()
-    self.ui:handleEvent(Event:new("UpdateToc"))
+    -- So, provide force=true.
+    self:onUpdatePos(true)
 end
 
 return ReaderRolling

@@ -1,7 +1,6 @@
-local ConfirmBox = require("ui/widget/confirmbox")
 local Device = require("device")
 local Event = require("ui/event")
-local InputContainer = require("ui/widget/container/inputcontainer")
+local EventListener = require("ui/widget/eventlistener")
 local Notification = require("ui/widget/notification")
 local Screen = Device.screen
 local UIManager = require("ui/uimanager")
@@ -9,7 +8,7 @@ local bit = require("bit")
 local _ = require("gettext")
 local T = require("ffi/util").template
 
-local DeviceListener = InputContainer:new{}
+local DeviceListener = EventListener:extend{}
 
 local function _setSetting(name)
     G_reader_settings:makeTrue(name)
@@ -84,10 +83,7 @@ if Device:hasFrontlight() then
             end
             local gestureScale
             local scale_multiplier
-            if ges.ges == "two_finger_swipe" then
-                -- for backward compatibility
-                scale_multiplier = FRONTLIGHT_SENSITIVITY_DECREASE * 0.8
-            elseif ges.ges == "swipe" then
+            if ges.ges == "two_finger_swipe" or ges.ges == "swipe" then
                 scale_multiplier = 0.8
             else
                 scale_multiplier = 1
@@ -210,7 +206,6 @@ if Device:hasFrontlight() then
             new_text = _("Frontlight disabled.")
         end
         Notification:notify(new_text)
-        return true
     end
 
     function DeviceListener:onShowFlDialog()
@@ -219,7 +214,7 @@ if Device:hasFrontlight() then
 
 end
 
-if Device:canToggleGSensor() then
+if Device:hasGSensor() then
     function DeviceListener:onToggleGSensor()
         _toggleSetting("input_ignore_gsensor")
         Device:toggleGSensor(not G_reader_settings:isTrue("input_ignore_gsensor"))
@@ -229,9 +224,7 @@ if Device:canToggleGSensor() then
         else
             new_text = _("Accelerometer rotation events on.")
         end
-        UIManager:show(Notification:new{
-            text = new_text,
-        })
+        Notification:notify(new_text)
         return true
     end
 end
@@ -242,9 +235,10 @@ if not Device:isAlwaysFullscreen() then
     end
 end
 
-function DeviceListener:onIterateRotation()
-    -- Simply rotate by 90° CW
-    local arg = bit.band(Screen:getRotationMode() + 1, 3)
+function DeviceListener:onIterateRotation(ccw)
+    -- Simply rotate by 90° CW or CCW
+    local step = ccw and -1 or 1
+    local arg = bit.band(Screen:getRotationMode() + step, 3)
     self.ui:handleEvent(Event:new("SetRotationMode", arg))
     return true
 end
@@ -312,40 +306,29 @@ function DeviceListener:onToggleNoFlashOnSecondChapterPage()
     _toggleSetting("no_refresh_on_second_chapter_page")
 end
 
-if Device:canReboot() then
-    function DeviceListener:onReboot()
-        UIManager:show(ConfirmBox:new{
-            text = _("Are you sure you want to reboot the device?"),
-            ok_text = _("Reboot"),
-            ok_callback = function()
-                UIManager:nextTick(UIManager.reboot_action)
-            end,
-        })
-    end
-end
-
-if Device:canPowerOff() then
-    function DeviceListener:onPowerOff()
-        UIManager:show(ConfirmBox:new{
-            text = _("Are you sure you want to power off the device?"),
-            ok_text = _("Power off"),
-            ok_callback = function()
-                UIManager:nextTick(UIManager.poweroff_action)
-            end,
-        })
-    end
-end
-
-function DeviceListener:onSuspendEvent()
-    UIManager:suspend()
-end
-
-function DeviceListener:onExit(callback)
-    self.ui.menu:exitOrRestart(callback)
+function DeviceListener:onSwapPageTurnButtons()
+    _toggleSetting("input_invert_page_turn_keys")
+    Device:invertButtons()
 end
 
 function DeviceListener:onRestart()
     self.ui.menu:exitOrRestart(function() UIManager:restartKOReader() end)
+end
+
+function DeviceListener:onRequestSuspend()
+    UIManager:suspend()
+end
+
+function DeviceListener:onRequestReboot()
+    UIManager:askForReboot()
+end
+
+function DeviceListener:onRequestPowerOff()
+    UIManager:askForPowerOff()
+end
+
+function DeviceListener:onExit(callback)
+    self.ui.menu:exitOrRestart(callback)
 end
 
 function DeviceListener:onFullRefresh()

@@ -1,14 +1,13 @@
-local Dispatcher = require("dispatcher")
-local InputContainer = require("ui/widget/container/inputcontainer")
-local LoginDialog = require("ui/widget/logindialog")
-local InfoMessage = require("ui/widget/infomessage")
 local ConfirmBox = require("ui/widget/confirmbox")
+local Device = require("device")
+local Dispatcher = require("dispatcher")
+local Event = require("ui/event")
+local InfoMessage = require("ui/widget/infomessage")
+local Math = require("optmath")
+local MultiInputDialog = require("ui/widget/multiinputdialog")
 local NetworkMgr = require("ui/network/manager")
 local UIManager = require("ui/uimanager")
-local Device = require("device")
-local Event = require("ui/event")
-local Math = require("optmath")
-local Screen = Device.screen
+local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local logger = require("logger")
 local md5 = require("ffi/sha2").md5
 local random = require("random")
@@ -20,7 +19,7 @@ if G_reader_settings:hasNot("device_id") then
     G_reader_settings:saveSetting("device_id", random.uuid())
 end
 
-local KOSync = InputContainer:new{
+local KOSync = WidgetContainer:extend{
     name = "kosync",
     is_doc_only = true,
     title = _("Register/login to KOReader server"),
@@ -364,23 +363,32 @@ function KOSync:login()
         return
     end
 
-    self.login_dialog = LoginDialog:new{
+    local dialog
+    dialog = MultiInputDialog:new{
         title = self.title,
-        username = self.kosync_username or "",
+        fields = {
+            {
+                text = self.kosync_username,
+                hint = "username",
+            },
+            {
+                hint = "password",
+                text_type = "password",
+            },
+        },
         buttons = {
             {
                 {
                     text = _("Cancel"),
-                    enabled = true,
+                    id = "close",
                     callback = function()
-                        self:closeDialog()
+                        UIManager:close(dialog)
                     end,
                 },
                 {
                     text = _("Login"),
-                    enabled = true,
                     callback = function()
-                        local username, password = self:getCredential()
+                        local username, password = unpack(dialog:getFields())
                         local ok, err = validateUser(username, password)
                         if not ok then
                             UIManager:show(InfoMessage:new{
@@ -388,11 +396,10 @@ function KOSync:login()
                                 timeout = 2,
                             })
                         else
-                            self:closeDialog()
+                            UIManager:close(dialog)
                             UIManager:scheduleIn(0.5, function()
                                 self:doLogin(username, password)
                             end)
-
                             UIManager:show(InfoMessage:new{
                                 text = _("Logging in. Please wait…"),
                                 timeout = 1,
@@ -402,9 +409,8 @@ function KOSync:login()
                 },
                 {
                     text = _("Register"),
-                    enabled = true,
                     callback = function()
-                        local username, password = self:getCredential()
+                        local username, password = unpack(dialog:getFields())
                         local ok, err = validateUser(username, password)
                         if not ok then
                             UIManager:show(InfoMessage:new{
@@ -412,11 +418,10 @@ function KOSync:login()
                                 timeout = 2,
                             })
                         else
-                            self:closeDialog()
+                            UIManager:close(dialog)
                             UIManager:scheduleIn(0.5, function()
                                 self:doRegister(username, password)
                             end)
-
                             UIManager:show(InfoMessage:new{
                                 text = _("Registering. Please wait…"),
                                 timeout = 1,
@@ -426,21 +431,9 @@ function KOSync:login()
                 },
             },
         },
-        width = math.floor(Screen:getWidth() * 0.8),
-        height = math.floor(Screen:getHeight() * 0.4),
     }
-
-    UIManager:show(self.login_dialog)
-    self.login_dialog:onShowKeyboard()
-end
-
-function KOSync:closeDialog()
-    self.login_dialog:onClose()
-    UIManager:close(self.login_dialog)
-end
-
-function KOSync:getCredential()
-    return self.login_dialog:getCredential()
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
 end
 
 function KOSync:doRegister(username, password)

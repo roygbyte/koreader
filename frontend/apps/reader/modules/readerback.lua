@@ -13,22 +13,28 @@ local _ = require("gettext")
 -- additionally handles a location stack for each visited page or
 -- page view change (when scrolling in a same page)
 
-local ReaderBack = EventListener:new{
-    location_stack = {},
+local ReaderBack = EventListener:extend{
+    location_stack = nil, -- array
     -- a limit not intended to be a practical limit but just a failsafe
     max_stack = 5000,
 }
 
 function ReaderBack:init()
-    if Device:hasKeys() then
-        self.ui.key_events.Back = { {Device.input.group.Back}, doc = "Reader back" }
-    end
+    self:registerKeyEvents()
     -- Regular function wrapping our method, to avoid re-creating
     -- an anonymous function at each page turn
     self._addPreviousLocationToStackCallback = function()
         self:_addPreviousLocationToStack()
     end
 end
+
+function ReaderBack:registerKeyEvents()
+    if Device:hasKeys() then
+        self.ui.key_events.Back = { { Device.input.group.Back } }
+    end
+end
+
+ReaderBack.onPhysicalKeyboardConnected = ReaderBack.registerKeyEvents
 
 function ReaderBack:_getCurrentLocation()
     if self.ui.document.info.has_pages then

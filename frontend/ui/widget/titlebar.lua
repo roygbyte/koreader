@@ -15,6 +15,8 @@ local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
 local Screen = Device.screen
 
+local DGENERIC_ICON_SIZE = G_defaults:readSetting("DGENERIC_ICON_SIZE")
+
 local TitleBar = OverlapGroup:extend{
     width = nil, -- default to screen width
     fullscreen = false, -- larger font and small adjustments if fullscreen
@@ -286,7 +288,7 @@ function TitleBar:init()
         end
         local line_widget = LineWidget:new{
             dimen = Geom:new{ w = self.width, h = Size.line.thick },
-            background = self.bottom_line_color;
+            background = self.bottom_line_color
         }
         if self.bottom_line_h_padding then
             line_widget.dimen.w = line_widget.dimen.w - 2 * self.bottom_line_h_padding
@@ -338,6 +340,8 @@ function TitleBar:init()
     end
 
     self.dimen = Geom:new{
+        x = 0,
+        y = 0,
         w = self.width,
         h = self.titlebar_height, -- buttons can overflow this
     }
@@ -377,8 +381,7 @@ function TitleBar:init()
         table.insert(self, self.right_button)
     end
 
-    -- We :extend() OverlapGroup and did not :new() it, so we can
-    -- :init() it now, after we have added all the subelements.
+    -- Call our base class's init (especially since OverlapGroup has very peculiar self.dimen semantics...)
     OverlapGroup.init(self)
 end
 

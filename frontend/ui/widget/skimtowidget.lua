@@ -20,28 +20,26 @@ local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local _ = require("gettext")
 local Screen = Device.screen
 
-local SkimToWidget = FocusManager:new{}
+local SkimToWidget = FocusManager:extend{}
 
 function SkimToWidget:init()
     local screen_width = Screen:getWidth()
     local screen_height = Screen:getHeight()
 
     if Device:hasKeys() then
-        self.key_events.Close = { {Device.input.group.Back}, doc = "close skimto page" }
+        self.key_events.Close = { { Device.input.group.Back } }
     end
     if Device:isTouchDevice() then
-        self.ges_events = {
-            TapProgress = {
-                GestureRange:new{
-                    ges = "tap",
-                    range = Geom:new{
-                        x = 0, y = 0,
-                        w = screen_width,
-                        h = screen_height,
-                    }
-                },
+        self.ges_events.TapProgress = {
+            GestureRange:new{
+                ges = "tap",
+                range = Geom:new{
+                    x = 0, y = 0,
+                    w = screen_width,
+                    h = screen_height,
+                }
             },
-         }
+        }
     end
 
     self.buttons_layout = {}
@@ -56,7 +54,7 @@ function SkimToWidget:init()
     local button_span_unit_width = Size.span.horizontal_small
     local larger_span_units = 3 -- 3 x small span width
     local nb_span_units = 2 + 2*larger_span_units
-    local button_width = math.floor( (inner_width - nb_span_units * button_span_unit_width) / 5)
+    local button_width = math.floor( (inner_width - nb_span_units * button_span_unit_width) * (1/5))
     local button_inner_width = button_width - 2 * (Size.border.button + Size.padding.button)
     -- Update inner_width (possibly smaller because of math.floor())
     inner_width = button_width * 5 + nb_span_units * button_span_unit_width
@@ -370,11 +368,6 @@ function SkimToWidget:goToByEvent(event_name)
         self.curr_page = self.ui:getCurrentPage()
         self:update()
     end
-end
-
-function SkimToWidget:onAnyKeyPressed()
-    UIManager:close(self)
-    return true
 end
 
 function SkimToWidget:onFirstRowKeyPress(percent)

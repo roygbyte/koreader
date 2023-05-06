@@ -16,12 +16,13 @@ local NetworkMgr = require("ui/network/manager")
 local Persist = require("persist")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local dateparser = require("lib.dateparser")
+local lfs = require("libs/libkoreader-lfs")
 local logger = require("logger")
 local util = require("util")
 local _ = require("gettext")
 local T = FFIUtil.template
 
-local NewsDownloader = WidgetContainer:new{
+local NewsDownloader = WidgetContainer:extend{
     name = "news_downloader",
     initialized = false,
     feed_config_file = "feed_config.lua",
@@ -40,7 +41,7 @@ local NewsDownloader = WidgetContainer:new{
         enable_filter = false,
         filter_element = ""
     },
-    kv = {}
+    kv = nil, -- KeyValuePage
 }
 
 local FEED_TYPE_RSS = "rss"
@@ -437,6 +438,10 @@ function NewsDownloader:deserializeXMLString(xml_str)
     local libxml = require("lib/xml")
     -- Instantiate the object that parses the XML file as a Lua table.
     local xmlhandler = treehdl.simpleTreeHandler()
+
+    -- Remove UTF-8 byte order mark, as it will cause LuaXML to fail
+    xml_str = xml_str:gsub("^\xef\xbb\xbf", "", 1)
+
     -- Instantiate the object that parses the XML to a Lua table.
     local ok = pcall(function()
             libxml.xmlParser(xmlhandler):parse(xml_str)
@@ -673,7 +678,7 @@ function NewsDownloader:viewFeedList()
         }
     )
     -- Show the list of feeds.
-    if #self.kv ~= 0 then
+    if self.kv then
         UIManager:close(self.kv)
     end
     self.kv = KeyValuePage:new{
@@ -688,7 +693,7 @@ function NewsDownloader:viewFeedList()
 end
 
 function NewsDownloader:viewFeedItem(data)
-    if #self.kv ~= 0 then
+    if self.kv then
         UIManager:close(self.kv)
     end
     self.kv = KeyValuePage:new{
@@ -797,7 +802,7 @@ function NewsDownloader:updateFeedConfig(id, key, value)
     -- Because this method is called at the menu,
     -- we might not have an active view. So this conditional
     -- statement avoids closing a null reference.
-    if #self.kv ~= 0 then
+    if self.kv then
         UIManager:close(self.kv)
     end
     -- It's possible that we will get a null value.

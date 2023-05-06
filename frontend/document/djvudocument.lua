@@ -2,7 +2,7 @@ local Blitbuffer = require("ffi/blitbuffer")
 local Document = require("document/document")
 local DrawContext = require("ffi/drawcontext")
 
-local DjvuDocument = Document:new{
+local DjvuDocument = Document:extend{
     _document = false,
     -- libdjvulibre manages its own additional cache, default value is hard written in c module.
     is_djvu = true,
@@ -94,6 +94,10 @@ end
 
 function DjvuDocument:nativeToPageRectTransform(pageno, rect)
     return self.koptinterface:nativeToPageRectTransform(self, pageno, rect)
+end
+
+function DjvuDocument:getSelectedWordContext(word, nb_words, pos)
+    return self.koptinterface:getSelectedWordContext(word, nb_words, pos)
 end
 
 function DjvuDocument:getOCRWord(pageno, wbox)

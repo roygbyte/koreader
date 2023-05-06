@@ -5,14 +5,13 @@ Plugin for automatic dimming of the frontlight after an idle period.
 --]]--
 
 local Device = require("device")
-local Event = require("ui/event")
 local FFIUtil = require("ffi/util")
 local SpinWidget = require("ui/widget/spinwidget")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local TrapWidget = require("ui/widget/trapwidget")
+local datetime = require("datetime")
 local time = require("ui/time")
-local util = require("util")
 local _ = require("gettext")
 local C_ = _.pgettext
 local Powerd = Device.powerd
@@ -23,7 +22,9 @@ local DEFAULT_AUTODIM_DURATION_S = 5
 local DEFAULT_AUTODIM_FRACTION = 20
 local AUTODIM_EVENT_FREQUENCY = 2 -- in Hz; Frequenzy for FrontlightChangedEvent on E-Ink devices
 
-local AutoDim = WidgetContainer:new{ name = "autodim" }
+local AutoDim = WidgetContainer:extend{
+    name = "autodim",
+}
 
 function AutoDim:init()
     self.autodim_starttime_m = G_reader_settings:readSetting("autodim_starttime_minutes", -1)
@@ -39,8 +40,6 @@ function AutoDim:init()
     self.isCurrentlyDimming = false -- true during or after the dimming ramp
     self.last_ramp_scheduling_time = nil -- holds start time of the next scheduled ramp task
     self.trap_widget = nil
-
-    self.top_widget_before_dim = nil
 end
 
 function AutoDim:addToMainMenu(menu_items)
@@ -56,7 +55,7 @@ function AutoDim:getAutoDimMenu()
                 text_func = function()
                     return self.autodim_starttime_m <= 0 and _("Idle time for dimmer") or
                     T(_("Idle time for dimmer: %1"),
-                        util.secondsToClockDuration("modern", self.autodim_starttime_m * 60, false, true, false, true))
+                        datetime.secondsToClockDuration("modern", self.autodim_starttime_m * 60, false, true, false, true))
                 end,
                 checked_func = function() return self.autodim_starttime_m > 0 end,
                 callback = function(touchmenu_instance)
@@ -95,7 +94,7 @@ function AutoDim:getAutoDimMenu()
             {
                 text_func = function()
                     return T(_("Dimmer duration: %1"),
-                        util.secondsToClockDuration("modern", self.autodim_duration_s, false, true, false, true))
+                        datetime.secondsToClockDuration("modern", self.autodim_duration_s, false, true, false, true))
                 end,
                 enabled_func = function() return self.autodim_starttime_m > 0 end,
                 callback = function(touchmenu_instance)
@@ -180,7 +179,6 @@ end
 function AutoDim:restoreFrontlight()
     if self.autodim_save_fl then
         Powerd:setIntensity(self.autodim_save_fl)
-        self:updateFooter(true)
         self.autodim_save_fl = nil
     end
 end
@@ -270,19 +268,6 @@ function AutoDim:onFrontlightTurnedOff()
     self:_schedule_autodim_task() -- reschedule
 end
 
-function AutoDim:updateFooter(clear)
-    -- update footer only if it is not covered by another widget
-    if self.top_widget_before_dim == "ReaderUI" or
-        (self.top_widget_before_dim ~= "ConfigDialog" and self.top_widget_before_dim ~= "ScreenSaver"
-        and self.top_widget_before_dim ~= "VirtualKeyboard") then
-
-        UIManager:broadcastEvent(Event:new("UpdateFooter", self.view and self.view.footer_visible or false))
-    end
-    if clear then
-        self.top_widget_before_dim = nil
-    end
-end
-
 function AutoDim:autodim_task()
     if self.isCurrentlyDimming then return end
     if Powerd:isFrontlightOff() then
@@ -293,22 +278,23 @@ function AutoDim:autodim_task()
     local check_delay = time.s(self.autodim_starttime_m * 60) - idle_duration
     if check_delay <= 0 then
         self.autodim_save_fl = self.autodim_save_fl or Powerd:frontlightIntensity()
-        self.autodim_end_fl = math.floor(self.autodim_save_fl * self.autodim_fraction / 100 + 0.5)
+        self.autodim_end_fl = math.floor(self.autodim_save_fl * self.autodim_fraction * (1/100) + 0.5)
         -- Clamp `self.autodim_end_fl` to 1 if `self.autodim_fraction` ~= 0
         if self.autodim_fraction ~= 0 and self.autodim_end_fl == 0 then
             self.autodim_end_fl = 1
         end
         local fl_diff = self.autodim_save_fl - self.autodim_end_fl
         if fl_diff > 0 then
+            if self.trap_widget then
+                UIManager:close(self.trap_widget)
+            end
+
             self.trap_widget = TrapWidget:new{
                 dismiss_callback = function()
                     self:restoreFrontlight()
                     self.trap_widget = nil
                 end
             }
-
-            -- This is the active widget before showing self.trap_widget
-            self.top_widget_before_dim = UIManager:getTopWidget()
 
             UIManager:show(self.trap_widget) -- suppress taps during dimming
 
@@ -338,7 +324,7 @@ function AutoDim:ramp_task()
         self.ramp_event_countdown = self.ramp_event_countdown - 1
         if self.ramp_event_countdown <= 0 then
             -- Update footer on every self.ramp_event_countdown call
-            self:updateFooter()
+            UIManager:broadcastEvent("UpdateFooter")
             self.ramp_event_countdown = self.ramp_event_countdown_startvalue
             self.last_ramp_scheduling_time = nil
         end

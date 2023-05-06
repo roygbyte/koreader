@@ -12,17 +12,16 @@ local ScrollTextWidget = require("ui/widget/scrolltextwidget")
 local Size = require("ui/size")
 local TextBoxWidget = require("ui/widget/textboxwidget")
 local UIManager = require("ui/uimanager")
-local Utf8Proc = require("ffi/utf8proc")
 local VerticalGroup = require("ui/widget/verticalgroup")
 local dbg = require("dbg")
 local util = require("util")
 local _ = require("gettext")
 local Screen = Device.screen
 
-local Keyboard
-local FocusManagerInstance = FocusManager:new{}
+local Keyboard -- Conditional instantiation
+local FocusManagerInstance -- Delayed instantiation
 
-local InputText = InputContainer:new{
+local InputText = InputContainer:extend{
     text = "",
     hint = "demo hint",
     input_type = nil, -- "number" or anything else
@@ -73,9 +72,7 @@ function InputText:initEventListener() end
 function InputText:onFocus() end
 function InputText:onUnfocus() end
 
--- only use PhysicalKeyboard if the device does not have touch screen
-if Device:isTouchDevice() or Device:hasDPad() then
-    Keyboard = require("ui/widget/virtualkeyboard")
+local function initTouchEvents()
     if Device:isTouchDevice() then
         function InputText:initEventListener()
             self.ges_events = {
@@ -140,7 +137,9 @@ if Device:isTouchDevice() or Device:hasDPad() then
                     self.is_keyboard_hidden = false
                 end
             end
-            if #self.charlist > 0 then -- Avoid cursor moving within a hint.
+            -- zh keyboard with candidates shown here has _frame_textwidget.dimen = nil.
+            -- Check to avoid crash.
+            if #self.charlist > 0 and self._frame_textwidget.dimen then -- Avoid cursor moving within a hint.
                 local textwidget_offset = self.margin + self.bordersize + self.padding
                 local x = ges.pos.x - self._frame_textwidget.dimen.x - textwidget_offset
                 local y = ges.pos.y - self._frame_textwidget.dimen.y - textwidget_offset
@@ -189,6 +188,7 @@ if Device:isTouchDevice() or Device:hasDPad() then
                     width = math.floor(math.min(Screen:getWidth(), Screen:getHeight()) * 0.8),
                     height = math.floor(math.max(Screen:getWidth(), Screen:getHeight()) * 0.4),
                     justified = false,
+                    modal = true,
                     stop_events_propagation = true,
                     buttons_table = {
                         {
@@ -282,6 +282,9 @@ if Device:isTouchDevice() or Device:hasDPad() then
             return false
         end
     end
+end
+
+local function initDPadEvents()
     if Device:hasDPad() then
         function InputText:onFocus()
             -- Event called by the focusmanager
@@ -300,9 +303,22 @@ if Device:isTouchDevice() or Device:hasDPad() then
             return true
         end
     end
-else
-    Keyboard = require("ui/widget/physicalkeyboard")
 end
+
+-- only use PhysicalKeyboard if the device does not support touch input
+function InputText.initInputEvents()
+    FocusManagerInstance = nil
+
+    if Device:isTouchDevice() or Device:hasDPad() then
+        Keyboard = require("ui/widget/virtualkeyboard")
+        initTouchEvents()
+        initDPadEvents()
+    else
+        Keyboard = require("ui/widget/physicalkeyboard")
+    end
+end
+
+InputText.initInputEvents()
 
 function InputText:checkTextEditability()
     -- The split of the 'text' string to a table of utf8 chars may not be
@@ -540,7 +556,7 @@ function InputText:initKeyboard()
     if self.input_type == "number" then
         keyboard_layer = 4
     end
-    self.key_events = nil
+    self.key_events = {}
     self.keyboard = Keyboard:new{
         keyboard_layer = keyboard_layer,
         inputbox = self,
@@ -574,8 +590,7 @@ function InputText:onKeyPress(key)
         if key["Backspace"] then
             self:delChar()
         elseif key["Del"] then
-            self:rightChar()
-            self:delChar()
+            self:delNextChar()
         elseif key["Left"] then
             self:leftChar()
         elseif key["Right"] then
@@ -614,6 +629,9 @@ function InputText:onKeyPress(key)
         -- FocusManager may turn on alternative key maps.
         -- These key map maybe single text keys.
         -- It will cause unexpected focus move instead of enter text to InputText
+        if not FocusManagerInstance then
+            FocusManagerInstance = FocusManager:new{}
+        end
         local is_alternative_key = FocusManagerInstance:isAlternativeKey(key)
         if not is_alternative_key and Device:isSDL() then
             -- SDL already insert char via TextInput event
@@ -759,36 +777,6 @@ function InputText:getStringPos(left_delimiter, right_delimiter, char_pos)
     return start_pos, end_pos
 end
 
---- Search for a string.
--- if start_pos not set, starts a search from the next to cursor position
--- returns first found position or 0 if not found
-function InputText:searchString(str, case_sensitive, start_pos)
-    local str_charlist = util.splitToChars(str)
-    local str_len = #str_charlist
-    local char_pos, found = 0, 0
-    start_pos = start_pos and (start_pos - 1) or self.charpos
-    for i = start_pos, #self.charlist - str_len do
-        for j = 1, str_len do
-            local char_txt = self.charlist[i + j]
-            local char_str = str_charlist[j]
-            if not case_sensitive then
-                char_txt = Utf8Proc.lowercase(util.fixUtf8(char_txt, "?"))
-                char_str = Utf8Proc.lowercase(util.fixUtf8(char_str, "?"))
-            end
-            if char_txt ~= char_str then
-                found = 0
-                break
-            end
-            found = found + 1
-        end
-        if found == str_len then
-            char_pos = i + 1
-            break
-        end
-    end
-    return char_pos
-end
-
 --- Return the character at the given offset. If is_absolute is truthy then the
 -- offset is the absolute position, otherwise the offset is added to the current
 -- cursor position (negative offsets are allowed).
@@ -842,6 +830,16 @@ function InputText:delChar()
     self:initTextBox(table.concat(self.charlist))
 end
 
+function InputText:delNextChar()
+    if self.readonly or not self:isTextEditable(true) then
+        return
+    end
+    if self.charpos > #self.charlist then return end
+    self.is_text_edited = true
+    table.remove(self.charlist, self.charpos)
+    self:initTextBox(table.concat(self.charlist))
+end
+
 function InputText:delToStartOfLine()
     if self.readonly or not self:isTextEditable(true) then
         return
@@ -890,11 +888,13 @@ function InputText:goToEndOfLine()
 end
 
 function InputText:goToHome()
-    self.text_widget:moveCursorToCharPos(1)
+    self.text_widget:moveCursorHome()
+    self.charpos, self.top_line_num = self.text_widget:getCharPos()
 end
 
 function InputText:goToEnd()
-    self.text_widget:moveCursorToCharPos(0)
+    self.text_widget:moveCursorEnd()
+    self.charpos, self.top_line_num = self.text_widget:getCharPos()
 end
 
 function InputText:moveCursorToCharPos(char_pos)

@@ -66,9 +66,9 @@ local _ = require("gettext")
 local Screen = require("device").screen
 local T = ffiUtil.template
 
-local ReaderUI = InputContainer:new{
+local ReaderUI = InputContainer:extend{
     name = "ReaderUI",
-    active_widgets = {},
+    active_widgets = nil, -- array
 
     -- if we have a parent container, it must be referenced for now
     dialog = nil,
@@ -104,6 +104,8 @@ function ReaderUI:registerPostReadyCallback(callback)
 end
 
 function ReaderUI:init()
+    self.active_widgets = {}
+
     -- cap screen refresh on pan to 2 refreshes per second
     local pan_rate = Screen.low_pan_rate and 2.0 or 30.0
 
@@ -120,9 +122,7 @@ function ReaderUI:init()
     -- Handle local settings migration
     SettingsMigration:migrateSettings(self.doc_settings)
 
-    if Device:hasKeys() then
-        self.key_events.Home = { {"Home"}, doc = "open file browser" }
-    end
+    self:registerKeyEvents()
 
     -- a view container (so it must be child #1!)
     -- all paintable widgets need to be a child of reader view
@@ -481,6 +481,15 @@ function ReaderUI:init()
     ReaderUI.instance = self
 end
 
+function ReaderUI:registerKeyEvents()
+    if Device:hasKeys() then
+        self.key_events.Home = { { "Home" } }
+        self.key_events.Reload = { { "F5" } }
+    end
+end
+
+ReaderUI.onPhysicalKeyboardConnected = ReaderUI.registerKeyEvents
+
 function ReaderUI:setLastDirForFileBrowser(dir)
     if dir and #dir > 1 and dir:sub(-1) == "/" then
         dir = dir:sub(1, -2)
@@ -760,9 +769,9 @@ function ReaderUI:onClose(full_refresh)
     if self.dialog ~= self then
         self:saveSettings()
     end
-    -- Serialize the most recently displayed page for later launch
-    DocCache:serialize()
     if self.document ~= nil then
+        -- Serialize the most recently displayed page for later launch
+        DocCache:serialize(self.document.file)
         logger.dbg("closing document")
         self:notifyCloseDocument()
     end
@@ -809,6 +818,10 @@ function ReaderUI:onHome()
     self:onClose()
     self:showFileManager()
     return true
+end
+
+function ReaderUI:onReload()
+    self:reloadDocument()
 end
 
 function ReaderUI:reloadDocument(after_close_callback)

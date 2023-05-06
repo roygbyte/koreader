@@ -17,7 +17,7 @@ local UIManager = require("ui/uimanager")
 local Input = Device.input
 local Screen = Device.screen
 
-local ScrollTextWidget = InputContainer:new{
+local ScrollTextWidget = InputContainer:extend{
     text = nil,
     charlist = nil,
     charpos = nil,
@@ -118,8 +118,8 @@ function ScrollTextWidget:init()
     end
     if Device:hasKeys() then
         self.key_events = {
-            ScrollDown = {{Input.group.PgFwd}, doc = "scroll down"},
-            ScrollUp = {{Input.group.PgBack}, doc = "scroll up"},
+            ScrollDown = { { Input.group.PgFwd } },
+            ScrollUp = { { Input.group.PgBack } },
         }
     end
 end
@@ -142,6 +142,15 @@ end
 
 function ScrollTextWidget:getCharPos()
     return self.text_widget:getCharPos()
+end
+
+function ScrollTextWidget:getCharPosAtXY(x, y)
+    return self.text_widget:getCharPosAtXY(x, y)
+end
+
+function ScrollTextWidget:getCharPosLineNum(charpos)
+    local _, _, line_num = self.text_widget:_getXYForCharPos(charpos)
+    return line_num -- screen line number
 end
 
 function ScrollTextWidget:updateScrollBar(is_partial)
@@ -187,8 +196,12 @@ function ScrollTextWidget:resetScroll()
     self.v_scroll_bar.enable = visible_line_count < total_line_count
 end
 
-function ScrollTextWidget:moveCursorToCharPos(charpos)
-    self.text_widget:moveCursorToCharPos(charpos)
+function ScrollTextWidget:moveCursorToCharPos(charpos, centered_lines_count)
+    if centered_lines_count then
+        self.text_widget:moveCursorToCharPosKeepingViewCentered(charpos, centered_lines_count)
+    else
+        self.text_widget:moveCursorToCharPos(charpos)
+    end
     self:updateScrollBar()
 end
 
@@ -217,6 +230,16 @@ end
 
 function ScrollTextWidget:moveCursorDown()
     self.text_widget:moveCursorDown()
+    self:updateScrollBar()
+end
+
+function ScrollTextWidget:moveCursorHome()
+    self.text_widget:moveCursorHome()
+    self:updateScrollBar()
+end
+
+function ScrollTextWidget:moveCursorEnd()
+    self.text_widget:moveCursorEnd()
     self:updateScrollBar()
 end
 

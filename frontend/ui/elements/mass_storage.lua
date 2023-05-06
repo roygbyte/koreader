@@ -1,6 +1,7 @@
 local Device = require("device")
 local Event = require("ui/event")
 local UIManager = require("ui/uimanager")
+local logger = require("logger")
 local _ = require("gettext")
 
 local MassStorage = {}
@@ -61,9 +62,9 @@ function MassStorage:start(never_ask)
             ok_callback = function()
                 -- save settings before activating USBMS:
                 UIManager:flushSettings()
-                UIManager._exit_code = 86
+                logger.info("Exiting KOReader to enter USBMS mode...")
                 UIManager:broadcastEvent(Event:new("Close"))
-                UIManager:quit()
+                UIManager:quit(86)
             end,
             cancel_callback = function()
                 self:dismiss()
@@ -74,9 +75,9 @@ function MassStorage:start(never_ask)
     else
         -- save settings before activating USBMS:
         UIManager:flushSettings()
-        UIManager._exit_code = 86
+        logger.info("Exiting KOReader to enter USBMS mode...")
         UIManager:broadcastEvent(Event:new("Close"))
-        UIManager:quit()
+        UIManager:quit(86)
     end
 end
 

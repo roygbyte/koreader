@@ -20,8 +20,8 @@ local UIManager = require("ui/uimanager")
 local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
+local datetime = require("datetime")
 local logger = require("logger")
-local util = require("util")
 local T = require("ffi/util").template
 local _ = require("gettext")
 local C_ = _.pgettext
@@ -97,8 +97,7 @@ local symbol_prefix = {
         pages_left_book = BD.mirroredUILayout() and "‹" or "›",
         pages_left = BD.mirroredUILayout() and "‹" or "›",
         battery = "",
-        -- @translators This is the footer compact item prefix for the number of bookmarks (bookmark count).
-        bookmark_count = C_("FooterCompactItemsPrefix", "BM"),
+        bookmark_count = "☆",
         percentage = nil,
         book_time_to_read = nil,
         chapter_time_to_read = BD.mirroredUILayout() and "«" or "»",
@@ -134,7 +133,7 @@ local PROGRESS_BAR_STYLE_THICK_DEFAULT_HEIGHT = 7
 local PROGRESS_BAR_STYLE_THIN_DEFAULT_HEIGHT = 3
 
 -- android: guidelines for rounded corner margins
-local material_pixels = 16 * math.floor(Screen:getDPI() / 160)
+local material_pixels = Screen:scaleByDPI(16)
 
 -- functions that generates footer text for each mode
 local footerTextGeneratorMap = {
@@ -229,7 +228,7 @@ local footerTextGeneratorMap = {
     time = function(footer)
         local symbol_type = footer.settings.item_prefix
         local prefix = symbol_prefix[symbol_type].time
-        local clock = util.secondsToHour(os.time(), G_reader_settings:isTrue("twelve_hour_clock"))
+        local clock = datetime.secondsToHour(os.time(), G_reader_settings:isTrue("twelve_hour_clock"))
         if not prefix then
             return clock
         else
@@ -352,7 +351,7 @@ local footerTextGeneratorMap = {
             local dummy, rss = statm:read("*number", "*number")
             statm:close()
             -- we got the nb of 4Kb-pages used, that we convert to MiB
-            rss = math.floor(rss * 4096 / 1024 / 1024)
+            rss = math.floor(rss * (4096 / 1024 / 1024))
             return (prefix .. " %d"):format(rss)
         end
         return ""
@@ -390,7 +389,7 @@ local footerTextGeneratorMap = {
             local title = doc_info.title:gsub(" ", "\xC2\xA0") -- replace space with no-break-space
             local title_widget = TextWidget:new{
                 text = title,
-                max_width = footer._saved_screen_width * footer.settings.book_title_max_width_pct / 100,
+                max_width = footer._saved_screen_width * footer.settings.book_title_max_width_pct * (1/100),
                 face = Font:getFace(footer.text_font_face, footer.settings.text_font_size),
                 bold = footer.settings.text_font_bold,
             }
@@ -410,7 +409,7 @@ local footerTextGeneratorMap = {
             chapter_title = chapter_title:gsub(" ", "\xC2\xA0") -- replace space with no-break-space
             local chapter_widget = TextWidget:new{
                 text = chapter_title,
-                max_width = footer._saved_screen_width * footer.settings.book_chapter_max_width_pct / 100,
+                max_width = footer._saved_screen_width * footer.settings.book_chapter_max_width_pct * (1/100),
                 face = Font:getFace(footer.text_font_face, footer.settings.text_font_size),
                 bold = footer.settings.text_font_bold,
             }
@@ -441,10 +440,10 @@ local ReaderFooter = WidgetContainer:extend{
     progress_percentage = 0.0,
     footer_text = nil,
     text_font_face = "ffont",
-    height = Screen:scaleBySize(DMINIBAR_CONTAINER_HEIGHT),
+    height = Screen:scaleBySize(G_defaults:readSetting("DMINIBAR_CONTAINER_HEIGHT")),
     horizontal_margin = Size.span.horizontal_default,
     bottom_padding = Size.padding.tiny,
-    settings = {},
+    settings = nil, -- table
     -- added to expose them to unit tests
     textGeneratorMap = footerTextGeneratorMap,
 }
@@ -477,7 +476,7 @@ ReaderFooter.default_settings = {
     toc_markers_width = 2, -- unscaled_size_check: ignore
     text_font_size = 14, -- unscaled_size_check: ignore
     text_font_bold = false,
-    container_height = DMINIBAR_CONTAINER_HEIGHT,
+    container_height = G_defaults:readSetting("DMINIBAR_CONTAINER_HEIGHT"),
     container_bottom_padding = 1, -- unscaled_size_check: ignore
     progress_margin_width = Screen:scaleBySize(Device:isAndroid() and material_pixels or 10), -- default margin (like self.horizontal_margin)
     progress_bar_min_width_pct = 20,
@@ -627,7 +626,7 @@ end
 function ReaderFooter:set_custom_text(touchmenu_instance)
     local text_dialog
     text_dialog = MultiInputDialog:new{
-        title = "Enter a custom text",
+        title = _("Enter a custom text"),
         fields = {
             {
                 text = self.custom_text or "",
@@ -652,7 +651,7 @@ function ReaderFooter:set_custom_text(touchmenu_instance)
                 {
                     text = _("Set"),
                     callback = function()
-                        local inputs = MultiInputDialog:getFields()
+                        local inputs = text_dialog:getFields()
                         local new_text, new_repetitions = inputs[1], inputs[2]
                         if new_text == "" then
                             new_text = " "
@@ -771,6 +770,22 @@ function ReaderFooter:unscheduleFooterAutoRefresh()
     UIManager:unschedule(self.autoRefreshFooter)
 end
 
+function ReaderFooter:shouldBeRepainted()
+    local n = 1
+    local widget = UIManager:getNthTopWidget(n)
+    while widget do
+        if widget.name == "ReaderUI" then
+            return true
+        elseif widget.covers_fullscreen or widget.covers_footer then
+            -- (e.g. the virtual keyboard sets widget_covers_footer == true)
+            return false
+        end
+        n = n + 1
+        widget = UIManager:getNthTopWidget(n)
+    end
+    return false
+end
+
 function ReaderFooter:rescheduleFooterAutoRefreshIfNeeded()
     if not self.autoRefreshFooter then
         -- Create this function the first time we're called
@@ -779,13 +794,8 @@ function ReaderFooter:rescheduleFooterAutoRefreshIfNeeded()
             -- (We want to avoid the footer to be painted over a widget covering it - we would
             -- be fine refreshing it if the widget is not covering it, but this is hard to
             -- guess from here.)
-            if UIManager:getTopWidget() == "ReaderUI" then
-                self:onUpdateFooter(self.view.footer_visible)
-            else
-                logger.dbg("Skipping ReaderFooter repaint, because ReaderUI is not the top-level widget")
-                -- NOTE: We *do* keep its content up-to-date, though
-                self:onUpdateFooter()
-            end
+            self:onUpdateFooter(self.view.footer_visible and self:shouldBeRepainted())
+
             self:rescheduleFooterAutoRefreshIfNeeded() -- schedule (or not) next refresh
         end
     end
@@ -820,6 +830,7 @@ end
 
 function ReaderFooter:setupTouchZones()
     if not Device:isTouchDevice() then return end
+    local DTAP_ZONE_MINIBAR = G_defaults:readSetting("DTAP_ZONE_MINIBAR")
     local footer_screen_zone = {
         ratio_x = DTAP_ZONE_MINIBAR.x, ratio_y = DTAP_ZONE_MINIBAR.y,
         ratio_w = DTAP_ZONE_MINIBAR.w, ratio_h = DTAP_ZONE_MINIBAR.h,
@@ -907,7 +918,6 @@ function ReaderFooter:disableFooter()
     self.resetLayout = function() end
     self.updateFooterPage = function() end
     self.updateFooterPos = function() end
-    self.onUpdatePos = function() end
     self.mode = self.mode_list.off
     self.view.footer_visible = false
 end
@@ -996,12 +1006,8 @@ function ReaderFooter:addToMainMenu(menu_items)
 
     -- menu item to fake footer tapping when touch area is disabled
     local settings_submenu_num = 1
-    if Geom:new{
-           x = DTAP_ZONE_MINIBAR.x,
-           y = DTAP_ZONE_MINIBAR.y,
-           w = DTAP_ZONE_MINIBAR.w,
-           h = DTAP_ZONE_MINIBAR.h
-       }:area() == 0 then
+    local DTAP_ZONE_MINIBAR = G_defaults:readSetting("DTAP_ZONE_MINIBAR")
+    if DTAP_ZONE_MINIBAR.h == 0 or DTAP_ZONE_MINIBAR.w == 0 then
         table.insert(sub_items, {
             text = _("Toggle mode"),
             enabled_func = function()
@@ -1250,7 +1256,7 @@ function ReaderFooter:addToMainMenu(menu_items)
                         value = container_height,
                         value_min = 7,
                         value_max = 98,
-                        default_value = DMINIBAR_CONTAINER_HEIGHT,
+                        default_value = G_defaults:readSetting("DMINIBAR_CONTAINER_HEIGHT"),
                         ok_text = _("Set height"),
                         title_text = _("Container height"),
                         keep_shown_on_apply = true,
@@ -1401,13 +1407,13 @@ function ReaderFooter:addToMainMenu(menu_items)
                 text_func = function()
                     local prefix_text = ""
                     if self.settings.item_prefix == "icons" then
-                        prefix_text = _("Icons")
+                        prefix_text = C_("Status bar", "Icons")
                     elseif self.settings.item_prefix == "compact_items" then
-                        prefix_text = _("Compact items")
+                        prefix_text = C_("Status bar", "Compact")
                     elseif self.settings.item_prefix == "letters" then
-                        prefix_text = _("Letters")
+                        prefix_text = C_("Status bar", "Letters")
                     end
-                    return T(_("Prefix: %1"), prefix_text)
+                    return T(_("Item style: %1"), prefix_text)
                 end,
                 sub_item_table = {
                     {
@@ -1416,7 +1422,7 @@ function ReaderFooter:addToMainMenu(menu_items)
                             for _, letter in pairs(symbol_prefix.icons) do
                                 table.insert(sym_tbl, letter)
                             end
-                            return T(_("Icons (%1)"), table.concat(sym_tbl, " "))
+                            return T(C_("Status bar", "Icons (%1)"), table.concat(sym_tbl, " "))
                         end,
                         checked_func = function()
                             return self.settings.item_prefix == "icons"
@@ -1429,32 +1435,32 @@ function ReaderFooter:addToMainMenu(menu_items)
                     {
                         text_func = function()
                             local sym_tbl = {}
-                            for _, letter in pairs(symbol_prefix.compact_items) do
-                                table.insert(sym_tbl, letter)
-                            end
-                            return T(_("Compact Items (%1)"), table.concat(sym_tbl, " "))
-                        end,
-                        checked_func = function()
-                            return self.settings.item_prefix == "compact_items"
-                        end,
-                        callback = function()
-                            self.settings.item_prefix = "compact_items"
-                            self:refreshFooter(true)
-                        end,
-                    },
-                    {
-                        text_func = function()
-                            local sym_tbl = {}
                             for _, letter in pairs(symbol_prefix.letters) do
                                 table.insert(sym_tbl, letter)
                             end
-                            return T(_("Letters (%1)"), table.concat(sym_tbl, " "))
+                            return T(C_("Status bar", "Letters (%1)"), table.concat(sym_tbl, " "))
                         end,
                         checked_func = function()
                             return self.settings.item_prefix == "letters"
                         end,
                         callback = function()
                             self.settings.item_prefix = "letters"
+                            self:refreshFooter(true)
+                        end,
+                    },
+                    {
+                        text_func = function()
+                            local sym_tbl = {}
+                            for _, letter in pairs(symbol_prefix.compact_items) do
+                                table.insert(sym_tbl, letter)
+                            end
+                            return T(C_("Status bar", "Compact (%1)"), table.concat(sym_tbl, " "))
+                        end,
+                        checked_func = function()
+                            return self.settings.item_prefix == "compact_items"
+                        end,
+                        callback = function()
+                            self.settings.item_prefix = "compact_items"
                             self:refreshFooter(true)
                         end,
                     },
@@ -2084,16 +2090,14 @@ function ReaderFooter:setTocMarkers(reset)
 end
 
 -- This is implemented by the Statistics plugin
-function ReaderFooter:getAvgTimePerPage()
-    return
-end
+function ReaderFooter:getAvgTimePerPage() end
 
 function ReaderFooter:getDataFromStatistics(title, pages)
     local sec = _("N/A")
     local average_time_per_page = self:getAvgTimePerPage()
     local user_duration_format = G_reader_settings:readSetting("duration_format", "classic")
     if average_time_per_page then
-        sec = util.secondsToClockDuration(user_duration_format, pages * average_time_per_page, true)
+        sec = datetime.secondsToClockDuration(user_duration_format, pages * average_time_per_page, true)
     end
     return title .. sec
 end
@@ -2173,7 +2177,7 @@ function ReaderFooter:_updateFooterText(force_repaint, force_recompute)
             self.footer_text.height = 0
         else
             -- Alongside a progress bar, it's the bar's width plus whatever's left.
-            local text_max_available_ratio = (100 - self.settings.progress_bar_min_width_pct) / 100
+            local text_max_available_ratio = (100 - self.settings.progress_bar_min_width_pct) * (1/100)
             self.footer_text:setMaxWidth(math.floor(text_max_available_ratio * self._saved_screen_width - 2 * self.settings.progress_margin_width - self.horizontal_margin))
             -- Add some spacing between the text and the bar
             self.text_width = self.footer_text:getSize().w + self.horizontal_margin
@@ -2230,6 +2234,8 @@ function ReaderFooter:_updateFooterText(force_repaint, force_recompute)
     end
 end
 
+-- Note: no need for :onDocumentRerendered(), ReaderToc will catch "DocumentRerendered"
+-- and will then emit a "TocReset" after the new ToC is made.
 function ReaderFooter:onTocReset()
     self:setTocMarkers(true)
     if self.view.view_mode == "page" then
@@ -2268,10 +2274,6 @@ function ReaderFooter:onPosUpdate(pos, pageno)
     self:updateFooterPos()
 end
 
--- recalculate footer sizes when document page count is updated
--- see documentation for more info about this event.
-ReaderFooter.onUpdatePos = ReaderFooter.onUpdateFooter
-
 function ReaderFooter:onReaderReady()
     self.ui.menu:registerToMainMenu(self)
     self:setupTouchZones()
@@ -2296,7 +2298,7 @@ function ReaderFooter:onReadSettings(config)
     if not self.ui.document.info.has_pages then
         local h_margins = config:readSetting("copt_h_page_margins")
                        or G_reader_settings:readSetting("copt_h_page_margins")
-                       or DCREREADER_CONFIG_H_MARGIN_SIZES_MEDIUM
+                       or G_defaults:readSetting("DCREREADER_CONFIG_H_MARGIN_SIZES_MEDIUM")
         self.book_margins_footer_width = math.floor((h_margins[1] + h_margins[2])/2)
     end
 end
@@ -2470,21 +2472,12 @@ end
 -- Used by event handlers that can trip without direct UI interaction...
 function ReaderFooter:maybeUpdateFooter()
     -- ...so we need to avoid stomping over unsuspecting widgets (usually, ScreenSaver).
-    if UIManager:getTopWidget() == "ReaderUI" then
-        self:onUpdateFooter(self.view.footer_visible)
-    else
-        self:onUpdateFooter()
-    end
+    self:onUpdateFooter(self.view.footer_visible and self:shouldBeRepainted())
 end
 
+-- is the same as maybeUpdateFooter
 function ReaderFooter:onFrontlightStateChanged()
-    -- Custom variant of maybeUpdateFooter that *also* whitelists the FL widget...
-    local top_wg = UIManager:getTopWidget()
-    if top_wg == "ReaderUI" or top_wg == "FrontLightWidget" then
-        self:onUpdateFooter(self.view.footer_visible)
-    else
-        self:onUpdateFooter()
-    end
+    self:onUpdateFooter(self.view.footer_visible and self:shouldBeRepainted())
 end
 
 function ReaderFooter:onNetworkConnected()

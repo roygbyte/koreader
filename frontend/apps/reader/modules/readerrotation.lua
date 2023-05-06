@@ -3,25 +3,37 @@ local Device = require("device")
 local Event = require("ui/event")
 local _ = require("gettext")
 
-local ReaderRotation = InputContainer:new{
-    current_rotation = 0
+local ReaderRotation = InputContainer:extend{
+    current_rotation = 0,
 }
 
 function ReaderRotation:init()
+    self:registerKeyEvents()
+    -- NOP our own gesture handling
+    self.ges_events = nil
+end
+
+function ReaderRotation:onGesture() end
+
+function ReaderRotation:registerKeyEvents()
     if Device:hasKeyboard() then
         self.key_events = {
             -- these will all generate the same event, just with different arguments
             RotateLeft = {
-                {"J"},
-                doc = "rotate left by 90 degrees",
-                event = "Rotate", args = -90 },
+                { "J" },
+                event = "Rotate",
+                args = -90
+            },
             RotateRight = {
-                {"K"},
-                doc = "rotate right by 90 degrees",
-                event = "Rotate", args = 90 },
+                { "K" },
+                event = "Rotate",
+                args = 90
+            },
         }
     end
 end
+
+ReaderRotation.onPhysicalKeyboardConnected = ReaderRotation.registerKeyEvents
 
 --- @todo Reset rotation on new document, maybe on new page?
 

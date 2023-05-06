@@ -19,42 +19,14 @@ local C = ffi.C
 require("ffi/posix_h")
 require("ffi/linux_input_h")
 
--- luacheck: push
--- luacheck: ignore
--- key press event values (KEY.value)
-local EVENT_VALUE_KEY_PRESS   = 1
-local EVENT_VALUE_KEY_REPEAT  = 2
-local EVENT_VALUE_KEY_RELEASE = 0
+-- EV_KEY values
+local KEY_PRESS   = 1
+local KEY_REPEAT  = 2
+local KEY_RELEASE = 0
 
--- For Kindle Oasis orientation events (ABS.code)
--- the ABS code of orientation event will be adjusted to -24 from 24 (C.ABS_PRESSURE)
--- as C.ABS_PRESSURE is also used to detect touch input in KOBO devices.
-local ABS_OASIS_ORIENTATION                     = -24
-local DEVICE_ORIENTATION_PORTRAIT_LEFT          = 15
-local DEVICE_ORIENTATION_PORTRAIT_RIGHT         = 17
-local DEVICE_ORIENTATION_PORTRAIT               = 19
-local DEVICE_ORIENTATION_PORTRAIT_ROTATED_LEFT  = 16
-local DEVICE_ORIENTATION_PORTRAIT_ROTATED_RIGHT = 18
-local DEVICE_ORIENTATION_PORTRAIT_ROTATED       = 20
-local DEVICE_ORIENTATION_LANDSCAPE              = 21
-local DEVICE_ORIENTATION_LANDSCAPE_ROTATED      = 22
-
--- Kindle Oasis 2 & 3 variant
--- c.f., drivers/input/misc/accel/bma2x2.c
-local UPWARD_PORTRAIT_UP_INTERRUPT_HAPPENED     = 15
-local UPWARD_PORTRAIT_DOWN_INTERRUPT_HAPPENED   = 16
-local UPWARD_LANDSCAPE_LEFT_INTERRUPT_HAPPENED  = 17
-local UPWARD_LANDSCAPE_RIGHT_INTERRUPT_HAPPENED = 18
-
--- For the events of the Forma & Libra accelerometers (MSC.value)
--- c.f., drivers/hwmon/mma8x5x.c
-local MSC_RAW_GSENSOR_PORTRAIT_DOWN             = 0x17
-local MSC_RAW_GSENSOR_PORTRAIT_UP               = 0x18
-local MSC_RAW_GSENSOR_LANDSCAPE_RIGHT           = 0x19
-local MSC_RAW_GSENSOR_LANDSCAPE_LEFT            = 0x1a
--- Not that we care about those, but they are reported, and accurate ;).
-local MSC_RAW_GSENSOR_BACK                      = 0x1b
-local MSC_RAW_GSENSOR_FRONT                     = 0x1c
+-- Based on ABS_MT_TOOL_TYPE values on Elan panels
+local TOOL_TYPE_FINGER = 0
+local TOOL_TYPE_PEN    = 1
 
 -- For debug logging of ev.type
 local linux_evdev_type_map = {
@@ -70,7 +42,6 @@ local linux_evdev_type_map = {
     [C.EV_FF] = "EV_FF",
     [C.EV_PWR] = "EV_PWR",
     [C.EV_FF_STATUS] = "EV_FF_STATUS",
-    [C.EV_MAX] = "EV_MAX",
     [C.EV_SDL] = "EV_SDL",
 }
 
@@ -118,23 +89,23 @@ local linux_evdev_abs_code_map = {
 
 local linux_evdev_msc_code_map = {
     [C.MSC_RAW] = "MSC_RAW",
+    [C.MSC_GYRO] = "MSC_GYRO",
 }
 
 local linux_evdev_rep_code_map = {
     [C.REP_DELAY] = "REP_DELAY",
     [C.REP_PERIOD] = "REP_PERIOD",
 }
--- luacheck: pop
 
 local _internal_clipboard_text = nil -- holds the last copied text
 
 local Input = {
     -- must point to the device implementation when instantiating
     device = nil,
-    -- this depends on keyboard layout and should be overridden:
-    event_map = {},
+    -- this depends on keyboard layout and should be overridden
+    event_map = nil, -- hash
     -- adapters are post processing functions that transform a given event to another event
-    event_map_adapter = {},
+    event_map_adapter = nil, -- hash
     -- EV_ABS event to honor for pressure event (if any)
     pressure_event = nil,
 
@@ -172,15 +143,27 @@ local Input = {
         },
     },
 
-    -- NOTE: When looking at the device in Portrait mode, that's assuming PgBack is on TOP, and PgFwd on the BOTTOM
-    rotation_map = {
-        [framebuffer.ORIENTATION_PORTRAIT] = {},
-        [framebuffer.ORIENTATION_LANDSCAPE] = { Up = "Right", Right = "Down", Down = "Left", Left = "Up", LPgBack = "LPgFwd", LPgFwd = "LPgBack", RPgBack = "RPgFwd", RPgFwd = "RPgBack" },
-        [framebuffer.ORIENTATION_PORTRAIT_ROTATED] = { Up = "Down", Right = "Left", Down = "Up", Left = "Right", LPgFwd = "LPgBack", LPgBack = "LPgFwd", RPgFwd = "RPgBack", RPgBack = "RPgFwd" },
-        [framebuffer.ORIENTATION_LANDSCAPE_ROTATED] = { Up = "Left", Right = "Up", Down = "Right", Left = "Down" }
+    fake_event_set = {
+        IntoSS = true, OutOfSS = true,
+        UsbPlugIn = true, UsbPlugOut = true,
+        Charging = true, NotCharging = true,
+        WakeupFromSuspend = true, ReadyToSuspend = true,
+        UsbDevicePlugIn = true, UsbDevicePlugOut = true,
+    },
+    -- Subset of fake_event_set for events that require passing a parameter along
+    complex_fake_event_set = {
+        UsbDevicePlugIn = true, UsbDevicePlugOut = true,
+    },
+    -- Crappy FIFO to forward parameters for those events to UIManager
+    fake_event_args = {
+        UsbDevicePlugIn = {},
+        UsbDevicePlugOut = {},
     },
 
-    timer_callbacks = {},
+    -- This might be modified at runtime, so we don't want any inheritance
+    rotation_map = nil, -- hash
+
+    timer_callbacks = nil, -- instance-specific table, because the object may get destroyed & recreated at runtime
     disable_double_tap = true,
     tap_interval_override = nil,
 
@@ -190,6 +173,7 @@ local Input = {
         Ctrl = false,
         Shift = false,
         Sym = false,
+        Meta = false,
     },
 
     -- repeat state:
@@ -198,8 +182,9 @@ local Input = {
     -- touch state:
     main_finger_slot = 0,
     cur_slot = 0,
-    MTSlots = {},
-    ev_slots = {},
+    MTSlots = nil, -- table, object may be replaced at runtime
+    active_slots = nil, -- ditto
+    ev_slots = nil, -- table
     gesture_detector = nil,
 
     -- simple internal clipboard implementation, can be overidden to use system clipboard
@@ -223,6 +208,12 @@ function Input:new(o)
 end
 
 function Input:init()
+    -- Initialize instance-specific tables
+    -- NOTE: All of these arrays may be destroyed & recreated at runtime, so we don't want a parent/class object for those.
+    self.timer_callbacks = {}
+    self.MTSlots = {}
+    self.active_slots = {}
+
     -- Handle default finger slot
     self.cur_slot = self.main_finger_slot
     self.ev_slots = {
@@ -236,6 +227,23 @@ function Input:init()
         input = self,
     }
 
+    if not self.event_map then
+        self.event_map = {}
+    end
+    if not self.event_map_adapter then
+        self.event_map_adapter = {}
+    end
+
+    -- NOTE: When looking at the device in Portrait mode, that's assuming PgBack is on TOP, and PgFwd on the BOTTOM
+    if not self.rotation_map then
+        self.rotation_map = {
+            [framebuffer.DEVICE_ROTATED_UPRIGHT]           = {},
+            [framebuffer.DEVICE_ROTATED_CLOCKWISE]         = { Up = "Right", Right = "Down", Down = "Left",  Left = "Up",    LPgBack = "LPgFwd",  LPgFwd  = "LPgBack", RPgBack = "RPgFwd",  RPgFwd  = "RPgBack" },
+            [framebuffer.DEVICE_ROTATED_UPSIDE_DOWN]       = { Up = "Down",  Right = "Left", Down = "Up",    Left = "Right", LPgFwd  = "LPgBack", LPgBack = "LPgFwd",  RPgFwd  = "RPgBack", RPgBack = "RPgFwd" },
+            [framebuffer.DEVICE_ROTATED_COUNTER_CLOCKWISE] = { Up = "Left",  Right = "Up",   Down = "Right", Left = "Down" },
+        }
+    end
+
     -- set up fake event map
     self.event_map[10000] = "IntoSS" -- go into screen saver
     self.event_map[10001] = "OutOfSS" -- go out of screen saver
@@ -245,6 +253,8 @@ function Input:init()
     self.event_map[10021] = "NotCharging"
     self.event_map[10030] = "WakeupFromSuspend"
     self.event_map[10031] = "ReadyToSuspend"
+    self.event_map[10040] = "UsbDevicePlugIn"
+    self.event_map[10041] = "UsbDevicePlugOut"
 
     -- user custom event map
     local custom_event_map_location = string.format(
@@ -266,6 +276,18 @@ function Input:init()
 end
 
 --[[--
+Setup a rotation_map that does nothing (for platforms where the events we get are already translated).
+--]]
+function Input:disableRotationMap()
+    self.rotation_map = {
+        [framebuffer.DEVICE_ROTATED_UPRIGHT]           = {},
+        [framebuffer.DEVICE_ROTATED_CLOCKWISE]         = {},
+        [framebuffer.DEVICE_ROTATED_UPSIDE_DOWN]       = {},
+        [framebuffer.DEVICE_ROTATED_COUNTER_CLOCKWISE] = {},
+    }
+end
+
+--[[--
 Wrapper for FFI input open.
 
 Note that we adhere to the "." syntax here for compatibility.
@@ -277,22 +299,35 @@ function Input.open(device, is_emu_events)
 end
 
 --[[--
-Different device models can implement their own hooks
-and register them.
+Different device models can implement their own hooks and register them.
 --]]
 function Input:registerEventAdjustHook(hook, hook_params)
-    local old = self.eventAdjustHook
-    self.eventAdjustHook = function(this, ev)
-        old(this, ev)
-        hook(this, ev, hook_params)
+    if self.eventAdjustHook == Input.eventAdjustHook then
+        -- First custom hook, skip the default NOP
+        self.eventAdjustHook = function(this, ev)
+            hook(this, ev, hook_params)
+        end
+    else
+        -- We've already got a custom hook, chain 'em
+        local old = self.eventAdjustHook
+        self.eventAdjustHook = function(this, ev)
+            old(this, ev)
+            hook(this, ev, hook_params)
+        end
     end
 end
 
 function Input:registerGestureAdjustHook(hook, hook_params)
-    local old = self.gestureAdjustHook
-    self.gestureAdjustHook = function(this, ges)
-        old(this, ges)
-        hook(this, ges, hook_params)
+    if self.gestureAdjustHook == Input.gestureAdjustHook then
+        self.gestureAdjustHook = function(this, ges)
+            hook(this, ges, hook_params)
+        end
+    else
+        local old = self.gestureAdjustHook
+        self.gestureAdjustHook = function(this, ges)
+            old(this, ges)
+            hook(this, ges, hook_params)
+        end
     end
 end
 
@@ -305,59 +340,77 @@ function Input:gestureAdjustHook(ges)
 end
 
 --- Catalog of predefined hooks.
-function Input:adjustTouchSwitchXY(ev)
-    if ev.type == C.EV_ABS then
-        if ev.code == C.ABS_X then
-            ev.code = C.ABS_Y
-        elseif ev.code == C.ABS_Y then
-            ev.code = C.ABS_X
-        elseif ev.code == C.ABS_MT_POSITION_X then
-            ev.code = C.ABS_MT_POSITION_Y
-        elseif ev.code == C.ABS_MT_POSITION_Y then
-            ev.code = C.ABS_MT_POSITION_X
-        end
+-- These are *not* usable directly as hooks, they're just building blocks (c.f., Kobo)
+function Input:adjustABS_SwitchXY(ev)
+    if ev.code == C.ABS_X then
+        ev.code = C.ABS_Y
+    elseif ev.code == C.ABS_Y then
+        ev.code = C.ABS_X
+    elseif ev.code == C.ABS_MT_POSITION_X then
+        ev.code = C.ABS_MT_POSITION_Y
+    elseif ev.code == C.ABS_MT_POSITION_Y then
+        ev.code = C.ABS_MT_POSITION_X
     end
 end
 
+function Input:adjustABS_Scale(ev, by)
+    if ev.code == C.ABS_X or ev.code == C.ABS_MT_POSITION_X then
+        ev.value = by.x * ev.value
+    elseif ev.code == C.ABS_Y or ev.code == C.ABS_MT_POSITION_Y then
+        ev.value = by.y * ev.value
+    end
+end
+
+function Input:adjustABS_MirrorX(ev, max_x)
+    if ev.code == C.ABS_X or ev.code == C.ABS_MT_POSITION_X then
+        ev.value = max_x - ev.value
+    end
+end
+
+function Input:adjustABS_MirrorY(ev, max_y)
+    if ev.code == C.ABS_Y or ev.code == C.ABS_MT_POSITION_Y then
+        ev.value = max_y - ev.value
+    end
+end
+
+function Input:adjustABS_SwitchAxesAndMirrorX(ev, max_x)
+    if ev.code == C.ABS_X then
+        ev.code = C.ABS_Y
+    elseif ev.code == C.ABS_Y then
+        ev.code = C.ABS_X
+        ev.value = max_x - ev.value
+    elseif ev.code == C.ABS_MT_POSITION_X then
+        ev.code = C.ABS_MT_POSITION_Y
+    elseif ev.code == C.ABS_MT_POSITION_Y then
+        ev.code = C.ABS_MT_POSITION_X
+        ev.value = max_x - ev.value
+    end
+end
+
+function Input:adjustABS_Translate(ev, by)
+    if ev.code == C.ABS_X or ev.code == C.ABS_MT_POSITION_X then
+        ev.value = by.x + ev.value
+    elseif ev.code == C.ABS_Y or ev.code == C.ABS_MT_POSITION_Y then
+        ev.value = by.y + ev.value
+    end
+end
+
+-- These *are* usable directly as hooks
 function Input:adjustTouchScale(ev, by)
     if ev.type == C.EV_ABS then
-        if ev.code == C.ABS_X or ev.code == C.ABS_MT_POSITION_X then
-            ev.value = by.x * ev.value
-        end
-        if ev.code == C.ABS_Y or ev.code == C.ABS_MT_POSITION_Y then
-            ev.value = by.y * ev.value
-        end
+        self:adjustABS_Scale(ev, by)
     end
 end
 
-function Input:adjustTouchMirrorX(ev, width)
-    if ev.type == C.EV_ABS
-    and (ev.code == C.ABS_X or ev.code == C.ABS_MT_POSITION_X) then
-        ev.value = width - ev.value
-    end
-end
-
-function Input:adjustTouchMirrorY(ev, height)
-    if ev.type == C.EV_ABS
-    and (ev.code == C.ABS_Y or ev.code == C.ABS_MT_POSITION_Y) then
-        ev.value = height - ev.value
+function Input:adjustTouchSwitchAxesAndMirrorX(ev, max_x)
+    if ev.type == C.EV_ABS then
+        self:adjustABS_SwitchAxesAndMirrorX(ev, max_x)
     end
 end
 
 function Input:adjustTouchTranslate(ev, by)
     if ev.type == C.EV_ABS then
-        if ev.code == C.ABS_X or ev.code == C.ABS_MT_POSITION_X then
-            ev.value = by.x + ev.value
-        end
-        if ev.code == C.ABS_Y or ev.code == C.ABS_MT_POSITION_Y then
-            ev.value = by.y + ev.value
-        end
-    end
-end
-
-function Input:adjustKindleOasisOrientation(ev)
-    if ev.type == C.EV_ABS and ev.code == C.ABS_PRESSURE then
-        ev.code = ABS_OASIS_ORIENTATION
+        self:adjustABS_Translate(ev, by)
     end
 end
 
@@ -443,7 +496,7 @@ end
 -- Reset the gesture parsing state to a blank slate
 function Input:resetState()
     if self.gesture_detector then
-        self.gesture_detector:clearStates()
+        self.gesture_detector:dropContacts()
         -- Resets the clock source probe
         self.gesture_detector:resetClockSource()
     end
@@ -452,6 +505,7 @@ end
 
 function Input:handleKeyBoardEv(ev)
     -- Detect loss of contact for the "snow" protocol...
+    -- NOTE: Some ST devices may also behave similarly, but we handle those via ABS_PRESSURE
     if self.snow_protocol then
         if ev.code == C.BTN_TOUCH and ev.value == 0 then
             -- Kernel sends it after loss of contact for *all* slots,
@@ -478,6 +532,26 @@ function Input:handleKeyBoardEv(ev)
 
             return
         end
+    elseif self.wacom_protocol then
+        if ev.code == C.BTN_TOOL_PEN then
+            -- Always send pen data to slot 0
+            self:setupSlotData(0)
+            if ev.value == 1 then
+                self:setCurrentMtSlot("tool", TOOL_TYPE_PEN)
+            else
+                self:setCurrentMtSlot("tool", TOOL_TYPE_FINGER)
+            end
+        elseif ev.code == C.BTN_TOUCH then
+            -- Much like on snow, use this to detect contact down & lift,
+            -- as ABS_PRESSURE may be entirely omitted from hover events,
+            -- and ABS_DISTANCE is not very clear cut...
+            self:setupSlotData(0)
+            if ev.value == 1 then
+                self:setCurrentMtSlot("id", 0)
+            else
+                self:setCurrentMtSlot("id", -1)
+            end
+        end
     end
 
     local keycode = self.event_map[ev.code]
@@ -491,42 +565,32 @@ function Input:handleKeyBoardEv(ev)
     end
 
     -- take device rotation into account
-    if self.rotation_map[self.device.screen:getRotationMode()][keycode] then
-        keycode = self.rotation_map[self.device.screen:getRotationMode()][keycode]
+    local rota = self.device.screen:getRotationMode()
+    if self.rotation_map[rota][keycode] then
+        keycode = self.rotation_map[rota][keycode]
     end
 
-    -- fake events
-    if keycode == "IntoSS" or keycode == "OutOfSS"
-    or keycode == "UsbPlugIn" or keycode == "UsbPlugOut"
-    or keycode == "Charging" or keycode == "NotCharging"
-    or keycode == "WakeupFromSuspend" or keycode == "ReadyToSuspend" then
-        return keycode
-    end
-
-    -- The hardware camera button is used in Android to toggle the touchscreen
-    if keycode == "Camera" and ev.value == EVENT_VALUE_KEY_RELEASE
-        and G_reader_settings:isTrue("camera_key_toggles_touchscreen") then
-        local isAndroid, android = pcall(require, "android")
-        if isAndroid then
-            -- toggle touchscreen behaviour
-            android.toggleTouchscreenIgnored()
-
-            -- show a toast with the new behaviour
-            if android.isTouchscreenIgnored() then
-                android.notification(_("Touchscreen disabled"))
-            else
-                android.notification(_("Touchscreen enabled"))
-            end
+    if self.fake_event_set[keycode] then
+        -- For events that pass a parameter in the input event's value field,
+        -- we kludge it up a bit, because we *want* a broadcastEvent *and* an argument, but...
+        -- * If we return an Event here, UIManager.event_handlers.__default__ will just pass it to UIManager:sendEvent(),
+        --   meaning it won't reach plugins (because these are not, and currently cannot be, registered as active_widgets).
+        -- * If we return a string here, our named UIManager.event_handlers cannot directly receive an argument...
+        -- So, we simply store it somewhere our handler can find and call it a day.
+        -- And we use an array as a FIFO because we cannot guarantee that insertions and removals will interleave nicely.
+        -- (This is all in the name of avoiding complexifying the common codepaths for events that should be few and far between).
+        if self.complex_fake_event_set[keycode] then
+            table.insert(self.fake_event_args[keycode], ev.value)
         end
-        return
+        return keycode
     end
 
     if keycode == "Power" then
         -- Kobo generates Power keycode only, we need to decide whether it's
         -- power-on or power-off ourselves.
-        if ev.value == EVENT_VALUE_KEY_PRESS then
+        if ev.value == KEY_PRESS then
             return "PowerPress"
-        elseif ev.value == EVENT_VALUE_KEY_RELEASE then
+        elseif ev.value == KEY_RELEASE then
             return "PowerRelease"
         end
     end
@@ -540,21 +604,16 @@ function Input:handleKeyBoardEv(ev)
     -- quit on Alt + F4
     -- this is also emitted by the close event in SDL
     if self:isEvKeyPress(ev) and self.modifiers["Alt"] and keycode == "F4" then
-        local Device = require("frontend/device")
         local UIManager = require("ui/uimanager")
-
-        local save_quit = function()
-            Device:saveSettings()
-            UIManager:quit()
-        end
-        UIManager:broadcastEvent(Event:new("Exit", save_quit))
+        UIManager:broadcastEvent(Event:new("Close")) -- Tell all widgets to close.
+        UIManager:nextTick(function() UIManager:quit() end) -- Ensure the program closes in case of some lingering dialog.
     end
 
     -- handle modifier keys
     if self.modifiers[keycode] ~= nil then
-        if ev.value == EVENT_VALUE_KEY_PRESS then
+        if ev.value == KEY_PRESS then
             self.modifiers[keycode] = true
-        elseif ev.value == EVENT_VALUE_KEY_RELEASE then
+        elseif ev.value == KEY_RELEASE then
             self.modifiers[keycode] = false
         end
         return
@@ -562,9 +621,9 @@ function Input:handleKeyBoardEv(ev)
 
     local key = Key:new(keycode, self.modifiers)
 
-    if ev.value == EVENT_VALUE_KEY_PRESS then
+    if ev.value == KEY_PRESS then
         return Event:new("KeyPress", key)
-    elseif ev.value == EVENT_VALUE_KEY_REPEAT then
+    elseif ev.value == KEY_REPEAT then
         -- NOTE: We only care about repeat events from the pageturn buttons...
         --       And we *definitely* don't want to flood the Event queue with useless SleepCover repeats!
         if keycode == "LPgBack"
@@ -585,7 +644,7 @@ function Input:handleKeyBoardEv(ev)
                 self.repeat_count = 0
             end
         end
-    elseif ev.value == EVENT_VALUE_KEY_RELEASE then
+    elseif ev.value == KEY_RELEASE then
         self.repeat_count = 0
         return Event:new("KeyRelease", key)
     end
@@ -611,20 +670,16 @@ function Input:handlePowerManagementOnlyEv(ev)
         return keycode
     end
 
-    -- Fake events
-    if keycode == "IntoSS" or keycode == "OutOfSS"
-    or keycode == "UsbPlugIn" or keycode == "UsbPlugOut"
-    or keycode == "Charging" or keycode == "NotCharging"
-    or keycode == "WakeupFromSuspend" or keycode == "ReadyToSuspend" then
+    if self.fake_event_set[keycode] then
         return keycode
     end
 
     if keycode == "Power" then
         -- Kobo generates Power keycode only, we need to decide whether it's
         -- power-on or power-off ourselves.
-        if ev.value == EVENT_VALUE_KEY_PRESS then
+        if ev.value == KEY_PRESS then
             return "PowerPress"
-        elseif ev.value == EVENT_VALUE_KEY_RELEASE then
+        elseif ev.value == KEY_RELEASE then
             return "PowerRelease"
         end
     end
@@ -644,7 +699,11 @@ function Input:handleGenericEv(ev)
 end
 
 function Input:handleMiscEv(ev)
-    -- should be handled by a misc event protocol plugin
+    -- overwritten by device implementation
+end
+
+function Input:handleGyroEv(ev)
+    -- setup by the Generic device implementation (for proper toggle handling)
 end
 
 function Input:handleSdlEv(ev)
@@ -680,44 +739,43 @@ attribute of the current slot.
 --]]
 function Input:handleTouchEv(ev)
     if ev.type == C.EV_ABS then
-        if #self.MTSlots == 0 then
-            table.insert(self.MTSlots, self:getMtSlot(self.cur_slot))
-        end
+        -- NOTE: Ideally, an input frame starts with either ABS_MT_SLOT or ABS_MT_TRACKING_ID,
+        --       but they *both* may be omitted if the last contact point just moved without lift.
+        --       The use of setCurrentMtSlotChecked instead of setCurrentMtSlot ensures
+        --       we actually setup the slot data storage and/or reference for the current slot in this case,
+        --       as the reference list is empty at the beginning of an input frame (c.f., Input:newFrame).
+        --       The most common platforms where you'll see this happen are:
+        --       * PocketBook, because of our InkView EVT_POINTERMOVE translation
+        --         (c.f., translateEvent @ ffi/input_pocketbook.lua).
+        --       * SDL, because of our SDL_MOUSEMOTION/SDL_FINGERMOTION translation
+        --         (c.f., waitForEvent @ ffi/SDL2_0.lua).
         if ev.code == C.ABS_MT_SLOT then
-            self:addSlotIfChanged(ev.value)
+            self:setupSlotData(ev.value)
         elseif ev.code == C.ABS_MT_TRACKING_ID then
             if self.snow_protocol then
-                -- We'll never get an ABS_MT_SLOT event,
-                -- instead we have a slot-like ABS_MT_TRACKING_ID value...
-                self:addSlotIfChanged(ev.value)
+                -- NOTE: We'll never get an ABS_MT_SLOT event, instead we have a slot-like ABS_MT_TRACKING_ID value...
+                --       This also means this may never be set to -1 on contact lift,
+                --       which is why we instead rely on EV_KEY:BTN_TOUCH:0 for that (c.f., handleKeyBoardEv).
+                self:setupSlotData(ev.value)
+            else
+                -- The Elan driver needlessly repeats unchanged ABS_MT_TRACKING_ID values,
+                -- which allows us to do this here instead of relying more aggressively on setCurrentMtSlotChecked.
+                if #self.MTSlots == 0 then
+                    self:addSlot(self.cur_slot)
+                end
             end
             self:setCurrentMtSlot("id", ev.value)
         elseif ev.code == C.ABS_MT_TOOL_TYPE then
             -- NOTE: On the Elipsa: Finger == 0; Pen == 1
             self:setCurrentMtSlot("tool", ev.value)
-        elseif ev.code == C.ABS_MT_POSITION_X then
-            self:setCurrentMtSlot("x", ev.value)
-        elseif ev.code == C.ABS_MT_POSITION_Y then
-            self:setCurrentMtSlot("y", ev.value)
+        elseif ev.code == C.ABS_MT_POSITION_X or ev.code == C.ABS_X then
+            self:setCurrentMtSlotChecked("x", ev.value)
+        elseif ev.code == C.ABS_MT_POSITION_Y or ev.code == C.ABS_Y then
+            self:setCurrentMtSlotChecked("y", ev.value)
         elseif self.pressure_event and ev.code == self.pressure_event and ev.value == 0 then
             -- Drop hovering *pen* events
             local tool = self:getCurrentMtSlotData("tool")
-            if tool and tool == 1 then
-                self:setCurrentMtSlot("id", -1)
-            end
-
-        -- code to emulate mt protocol on kobos
-        -- we "confirm" abs_x, abs_y only when pressure ~= 0
-        elseif ev.code == C.ABS_X then
-            self:setCurrentMtSlot("abs_x", ev.value)
-        elseif ev.code == C.ABS_Y then
-            self:setCurrentMtSlot("abs_y", ev.value)
-        elseif ev.code == C.ABS_PRESSURE then
-            if ev.value ~= 0 then
-                self:setCurrentMtSlot("id", 1)
-                self:confirmAbsxy()
-            else
-                self:cleanAbsxy()
+            if tool and tool == TOOL_TYPE_PEN then
                 self:setCurrentMtSlot("id", -1)
             end
         end
@@ -727,17 +785,18 @@ function Input:handleTouchEv(ev)
                 self:setMtSlot(MTSlot.slot, "timev", time.timeval(ev.time))
             end
             -- feed ev in all slots to state machine
-            local touch_ges = self.gesture_detector:feedEvent(self.MTSlots)
-            self.MTSlots = {}
-            if touch_ges then
+            local touch_gestures = self.gesture_detector:feedEvent(self.MTSlots)
+            self:newFrame()
+            local ges_evs = {}
+            for _, touch_ges in ipairs(touch_gestures) do
                 self:gestureAdjustHook(touch_ges)
-                return Event:new("Gesture",
-                    self.gesture_detector:adjustGesCoordinate(touch_ges)
-                )
+                table.insert(ges_evs, Event:new("Gesture", self.gesture_detector:adjustGesCoordinate(touch_ges)))
             end
+            return ges_evs
         end
     end
 end
+
 function Input:handleTouchEvPhoenix(ev)
     -- Hack on handleTouchEV for the Kobo Aura
     -- It seems to be using a custom protocol:
@@ -770,11 +829,8 @@ function Input:handleTouchEvPhoenix(ev)
     --            input_report_abs(elan_touch_data.input, C.ABS_MT_POSITION_Y, last_y2);
     --            input_mt_sync (elan_touch_data.input);
     if ev.type == C.EV_ABS then
-        if #self.MTSlots == 0 then
-            table.insert(self.MTSlots, self:getMtSlot(self.cur_slot))
-        end
         if ev.code == C.ABS_MT_TRACKING_ID then
-            self:addSlotIfChanged(ev.value)
+            self:setupSlotData(ev.value)
             self:setCurrentMtSlot("id", ev.value)
         elseif ev.code == C.ABS_MT_TOUCH_MAJOR and ev.value == 0 then
             self:setCurrentMtSlot("id", -1)
@@ -789,33 +845,45 @@ function Input:handleTouchEvPhoenix(ev)
                 self:setMtSlot(MTSlot.slot, "timev", time.timeval(ev.time))
             end
             -- feed ev in all slots to state machine
-            local touch_ges = self.gesture_detector:feedEvent(self.MTSlots)
-            self.MTSlots = {}
-            if touch_ges then
+            local touch_gestures = self.gesture_detector:feedEvent(self.MTSlots)
+            self:newFrame()
+            local ges_evs = {}
+            for _, touch_ges in ipairs(touch_gestures) do
                 self:gestureAdjustHook(touch_ges)
-                return Event:new("Gesture",
-                    self.gesture_detector:adjustGesCoordinate(touch_ges)
-                )
+                table.insert(ges_evs, Event:new("Gesture", self.gesture_detector:adjustGesCoordinate(touch_ges)))
             end
+            return ges_evs
         end
     end
 end
+
 function Input:handleTouchEvLegacy(ev)
-    -- Single Touch Protocol. Some devices emit both singletouch and multitouch events.
-    -- In those devices the 'handleTouchEv' function doesn't work as expected. Use this function instead.
+    -- Single Touch Protocol.
+    -- Some devices emit both singletouch and multitouch events,
+    -- on those devices, the 'handleTouchEv' function may not behave as expected. Use this one instead.
     if ev.type == C.EV_ABS then
-        if #self.MTSlots == 0 then
-            table.insert(self.MTSlots, self:getMtSlot(self.cur_slot))
-        end
         if ev.code == C.ABS_X then
-            self:setCurrentMtSlot("x", ev.value)
+            self:setCurrentMtSlotChecked("x", ev.value)
         elseif ev.code == C.ABS_Y then
-            self:setCurrentMtSlot("y", ev.value)
+            self:setCurrentMtSlotChecked("y", ev.value)
         elseif ev.code == C.ABS_PRESSURE then
             if ev.value ~= 0 then
-                self:setCurrentMtSlot("id", 1)
+                self:setCurrentMtSlotChecked("id", 1)
             else
-                self:setCurrentMtSlot("id", -1)
+                self:setCurrentMtSlotChecked("id", -1)
+
+                -- On Kobo Mk. 3 devices, the frame that reports a contact lift *actually* does the coordinates transform for us...
+                -- Unfortunately, our own transforms are not stateful, so, just revert 'em here,
+                -- since we can't simply avoid not doing 'em for that frame...
+                -- c.f., https://github.com/koreader/koreader/issues/2128#issuecomment-1236289909 for logs on a Touch B
+                -- NOTE: We can afford to do this here instead of on SYN_REPORT because the kernel *always*
+                --       reports ABS_PRESSURE after ABS_X/ABS_Y.
+                if self.touch_kobo_mk3_protocol then
+                    local y = 599 - self:getCurrentMtSlotData("x") -- Mk. 3 devices are all 600x800, so just hard-code it here.
+                    local x = self:getCurrentMtSlotData("y")
+                    self:setCurrentMtSlot("x", x)
+                    self:setCurrentMtSlot("y", y)
+                end
             end
         end
     elseif ev.type == C.EV_SYN then
@@ -825,104 +893,41 @@ function Input:handleTouchEvLegacy(ev)
             end
 
             -- feed ev in all slots to state machine
-            local touch_ges = self.gesture_detector:feedEvent(self.MTSlots)
-            self.MTSlots = {}
-            if touch_ges then
+            local touch_gestures = self.gesture_detector:feedEvent(self.MTSlots)
+            self:newFrame()
+            local ges_evs = {}
+            for _, touch_ges in ipairs(touch_gestures) do
                 self:gestureAdjustHook(touch_ges)
-                return Event:new("Gesture",
-                    self.gesture_detector:adjustGesCoordinate(touch_ges)
-                )
+                table.insert(ges_evs, Event:new("Gesture", self.gesture_detector:adjustGesCoordinate(touch_ges)))
             end
+            return ges_evs
         end
     end
 end
 
-function Input:handleOasisOrientationEv(ev)
+--- Accelerometer, in a platform-agnostic, custom format (EV_MSC:MSC_GYRO).
+--- (Translation should be done via registerEventAdjustHook in Device implementations).
+--- This needs to be called *via handleGyroEv* in a handleMiscEv implementation (c.f., Kobo, Kindle or PocketBook).
+function Input:handleMiscGyroEv(ev)
     local rotation_mode, screen_mode
-    if self.device:isZelda() then
-        if ev.value == UPWARD_PORTRAIT_UP_INTERRUPT_HAPPENED then
-            -- i.e., UR
-            rotation_mode = framebuffer.ORIENTATION_PORTRAIT
-            screen_mode = 'portrait'
-        elseif ev.value == UPWARD_LANDSCAPE_LEFT_INTERRUPT_HAPPENED then
-            -- i.e., CW
-            rotation_mode = framebuffer.ORIENTATION_LANDSCAPE
-            screen_mode = 'landscape'
-        elseif ev.value == UPWARD_PORTRAIT_DOWN_INTERRUPT_HAPPENED then
-            -- i.e., UD
-            rotation_mode = framebuffer.ORIENTATION_PORTRAIT_ROTATED
-            screen_mode = 'portrait'
-        elseif ev.value == UPWARD_LANDSCAPE_RIGHT_INTERRUPT_HAPPENED then
-            -- i.e., CCW
-            rotation_mode = framebuffer.ORIENTATION_LANDSCAPE_ROTATED
-            screen_mode = 'landscape'
-        end
+    if ev.value == C.DEVICE_ROTATED_UPRIGHT then
+        -- i.e., UR
+        rotation_mode = framebuffer.DEVICE_ROTATED_UPRIGHT
+        screen_mode = "portrait"
+    elseif ev.value == C.DEVICE_ROTATED_CLOCKWISE then
+        -- i.e., CW
+        rotation_mode = framebuffer.DEVICE_ROTATED_CLOCKWISE
+        screen_mode = "landscape"
+    elseif ev.value == C.DEVICE_ROTATED_UPSIDE_DOWN then
+        -- i.e., UD
+        rotation_mode = framebuffer.DEVICE_ROTATED_UPSIDE_DOWN
+        screen_mode = "portrait"
+    elseif ev.value == C.DEVICE_ROTATED_COUNTER_CLOCKWISE then
+        -- i.e., CCW
+        rotation_mode = framebuffer.DEVICE_ROTATED_COUNTER_CLOCKWISE
+        screen_mode = "landscape"
     else
-        if ev.value == DEVICE_ORIENTATION_PORTRAIT
-            or ev.value == DEVICE_ORIENTATION_PORTRAIT_LEFT
-            or ev.value == DEVICE_ORIENTATION_PORTRAIT_RIGHT then
-            -- i.e., UR
-            rotation_mode = framebuffer.ORIENTATION_PORTRAIT
-            screen_mode = 'portrait'
-        elseif ev.value == DEVICE_ORIENTATION_LANDSCAPE then
-            -- i.e., CW
-            rotation_mode = framebuffer.ORIENTATION_LANDSCAPE
-            screen_mode = 'landscape'
-        elseif ev.value == DEVICE_ORIENTATION_PORTRAIT_ROTATED
-            or ev.value == DEVICE_ORIENTATION_PORTRAIT_ROTATED_LEFT
-            or ev.value == DEVICE_ORIENTATION_PORTRAIT_ROTATED_RIGHT then
-            -- i.e., UD
-            rotation_mode = framebuffer.ORIENTATION_PORTRAIT_ROTATED
-            screen_mode = 'portrait'
-        elseif ev.value == DEVICE_ORIENTATION_LANDSCAPE_ROTATED then
-            -- i.e., CCW
-            rotation_mode = framebuffer.ORIENTATION_LANDSCAPE_ROTATED
-            screen_mode = 'landscape'
-        end
-    end
-
-    local old_rotation_mode = self.device.screen:getRotationMode()
-    if self.device:isGSensorLocked() then
-        local old_screen_mode = self.device.screen:getScreenMode()
-        if rotation_mode ~= old_rotation_mode and screen_mode == old_screen_mode then
-            -- Cheaper than a full SetRotationMode event, as we don't need to re-layout anything.
-            self.device.screen:setRotationMode(rotation_mode)
-            local UIManager = require("ui/uimanager")
-            UIManager:onRotation()
-        end
-    else
-        if rotation_mode ~= old_rotation_mode then
-            return Event:new("SetRotationMode", rotation_mode)
-        end
-    end
-end
-
---- Accelerometer on the Forma/Libra
-function Input:handleMiscEvNTX(ev)
-    local rotation_mode, screen_mode
-    if ev.code == C.MSC_RAW then
-        if ev.value == MSC_RAW_GSENSOR_PORTRAIT_UP then
-            -- i.e., UR
-            rotation_mode = framebuffer.ORIENTATION_PORTRAIT
-            screen_mode = 'portrait'
-        elseif ev.value == MSC_RAW_GSENSOR_LANDSCAPE_RIGHT then
-            -- i.e., CW
-            rotation_mode = framebuffer.ORIENTATION_LANDSCAPE
-            screen_mode = 'landscape'
-        elseif ev.value == MSC_RAW_GSENSOR_PORTRAIT_DOWN then
-            -- i.e., UD
-            rotation_mode = framebuffer.ORIENTATION_PORTRAIT_ROTATED
-            screen_mode = 'portrait'
-        elseif ev.value == MSC_RAW_GSENSOR_LANDSCAPE_LEFT then
-            -- i.e., CCW
-            rotation_mode = framebuffer.ORIENTATION_LANDSCAPE_ROTATED
-            screen_mode = 'landscape'
-        else
-            -- Discard FRONT/BACK
-            return
-        end
-    else
-        -- Discard unhandled event codes, just to future-proof this ;).
+        -- Discard FRONT/BACK
         return
     end
 
@@ -943,44 +948,51 @@ function Input:handleMiscEvNTX(ev)
 end
 
 --- Allow toggling the accelerometer at runtime.
-function Input:toggleMiscEvNTX(toggle)
+function Input:toggleGyroEvents(toggle)
     if toggle == true then
         -- Honor Gyro events
-        if not self.isNTXAccelHooked then
-            self.handleMiscEv = self.handleMiscEvNTX
-            self.isNTXAccelHooked = true
+        if self.handleGyroEv ~= self.handleMiscGyroEv then
+            self.handleGyroEv = self.handleMiscGyroEv
         end
     elseif toggle == false then
         -- Ignore Gyro events
-        if self.isNTXAccelHooked then
-            self.handleMiscEv = self.voidEv
-            self.isNTXAccelHooked = false
+        if self.handleGyroEv == self.handleMiscGyroEv then
+            self.handleGyroEv = self.voidEv
         end
     else
         -- Toggle it
-        if self.isNTXAccelHooked then
-            self.handleMiscEv = self.voidEv
+        if self.handleGyroEv == self.handleMiscGyroEv then
+            self.handleGyroEv = self.voidEv
         else
-            self.handleMiscEv = self.handleMiscEvNTX
+            self.handleGyroEv = self.handleMiscGyroEv
         end
-
-        self.isNTXAccelHooked = not self.isNTXAccelHooked
     end
 end
 
 -- helpers for touch event data management:
 
-function Input:setMtSlot(slot, key, val)
+function Input:initMtSlot(slot)
     if not self.ev_slots[slot] then
         self.ev_slots[slot] = {
             slot = slot
         }
     end
+end
 
+function Input:setMtSlot(slot, key, val)
     self.ev_slots[slot][key] = val
 end
 
 function Input:setCurrentMtSlot(key, val)
+    self:setMtSlot(self.cur_slot, key, val)
+end
+
+-- Same as above, but ensures the current slot actually has a live ref first
+function Input:setCurrentMtSlotChecked(key, val)
+    if #self.MTSlots == 0 then
+        self:addSlot(self.cur_slot)
+    end
+
     self:setMtSlot(self.cur_slot, key, val)
 end
 
@@ -1001,33 +1013,50 @@ function Input:getCurrentMtSlotData(key)
     return nil
 end
 
+function Input:newFrame()
+    -- Array of references to the data for each slot seen in this input frame
+    -- (Points to self.ev_slots, c.f., getMtSlot)
+    self.MTSlots = {}
+    -- Simple hash to keep track of which references we've inserted into self.MTSlots (keys are slot numbers)
+    self.active_slots = {}
+end
+
+function Input:addSlot(value)
+    self:initMtSlot(value)
+    table.insert(self.MTSlots, self:getMtSlot(value))
+    self.active_slots[value] = true
+    self.cur_slot = value
+end
+
 function Input:addSlotIfChanged(value)
     if self.cur_slot ~= value then
-        table.insert(self.MTSlots, self:getMtSlot(value))
-        self.cur_slot = value
+        -- We've already seen that slot in this frame, don't insert a duplicate reference!
+        if self.active_slots[value] then
+            self.cur_slot = value
+        else
+            self:addSlot(value)
+        end
     end
 end
 
-function Input:confirmAbsxy()
-    self:setCurrentMtSlot("x", self.ev_slots[self.cur_slot]["abs_x"])
-    self:setCurrentMtSlot("y", self.ev_slots[self.cur_slot]["abs_y"])
-end
-
-function Input:cleanAbsxy()
-    self:setCurrentMtSlot("abs_x", nil)
-    self:setCurrentMtSlot("abs_y", nil)
+function Input:setupSlotData(value)
+    if #self.MTSlots == 0 then
+        self:addSlot(value)
+    else
+        self:addSlotIfChanged(value)
+    end
 end
 
 function Input:isEvKeyPress(ev)
-    return ev.value == EVENT_VALUE_KEY_PRESS
+    return ev.value == KEY_PRESS
 end
 
 function Input:isEvKeyRepeat(ev)
-    return ev.value == EVENT_VALUE_KEY_REPEAT
+    return ev.value == KEY_REPEAT
 end
 
 function Input:isEvKeyRelease(ev)
-    return ev.value == EVENT_VALUE_KEY_RELEASE
+    return ev.value == KEY_RELEASE
 end
 
 
@@ -1051,9 +1080,9 @@ function Input:waitEvent(now, deadline)
     --                          Otherwise, errno is the actual error code from the backend (e.g., select's errno for the C backend).
     -- * nil: When something terrible happened (e.g., fatal poll/read failure). We abort in such cases.
     while true do
-        if #self.timer_callbacks > 0 then
+        if self.timer_callbacks[1] then
             -- If we have timers set, we need to honor them once we're done draining the input events.
-            while #self.timer_callbacks > 0 do
+            while self.timer_callbacks[1] do
                 -- Choose the earliest deadline between the next timer deadline, and our full timeout deadline.
                 local deadline_is_timer = false
                 local with_timerfd = false
@@ -1088,7 +1117,9 @@ function Input:waitEvent(now, deadline)
                         -- Deadline hasn't been blown yet, honor it.
                         poll_timeout = poll_deadline - now
                     else
-                        -- We've already blown the deadline: make select return immediately (most likely straight to timeout)
+                        -- We've already blown the deadline: make select return immediately (most likely straight to timeout).
+                        -- NOTE: With the timerfd backend, this is sometimes a tad optimistic,
+                        --       as we may in fact retry for a few iterations while waiting for the timerfd to actually expire.
                         poll_timeout = 0
                     end
                 end
@@ -1121,19 +1152,35 @@ function Input:waitEvent(now, deadline)
                     end
 
                     if consume_callback then
-                        local touch_ges = self.timer_callbacks[1].callback()
-                        table.remove(self.timer_callbacks, 1)
-                        -- If it was a timerfd, we also need to close the fd.
-                        -- NOTE: The fact that deadlines are sorted *should* ensure that the timerfd that expired
-                        --       is actually the first of the list without us having to double-check that...
+                        local touch_ges
+                        local timer_idx = 1
+                        if timerfd then
+                            -- If there's a deadline collision, make sure we call the callback that matches the timerfd returned.
+                            -- We'll handle the next one on the next iteration, as an expired timerfd will ensure
+                            -- that select will return immediately.
+                            for i, item in ipairs(self.timer_callbacks) do
+                                if item.timerfd == timerfd then
+                                    -- In the vast majority of cases, we should find our match on the first entry ;).
+                                    timer_idx = i
+                                    touch_ges = item.callback()
+                                    break
+                                end
+                            end
+                        else
+                            -- If there's a deadline collision, we'll just handle the next one on the next iteration,
+                            -- because the blown deadline means we'll have asked waitForEvent to return immediately.
+                            touch_ges = self.timer_callbacks[1].callback()
+                        end
+
+                        -- Cleanup after the timer callback.
+                        -- GestureDetector has guards in place to avoid double frees in case the callback itself
+                        -- affected the timerfd or timer_callbacks list (e.g., by dropping a contact).
                         if timerfd then
                             input.clearTimer(timerfd)
                         end
+                        table.remove(self.timer_callbacks, timer_idx)
+
                         if touch_ges then
-                            -- The timers we'll encounter are for finalizing a hold or (if enabled) double tap gesture,
-                            -- as such, it makes no sense to try to detect *multiple* subsequent gestures.
-                            -- This is why we clear the full list of timers on the first match ;).
-                            self:clearTimeouts()
                             self:gestureAdjustHook(touch_ges)
                             return {
                                 Event:new("Gesture", self.gesture_detector:adjustGesCoordinate(touch_ges))
@@ -1205,7 +1252,6 @@ function Input:waitEvent(now, deadline)
                 -- NOTE: This is rather spammy and computationally intensive,
                 --       and we can't conditionally prevent evalutation of function arguments,
                 --       so, just hide the whole thing behind a branch ;).
-                DEBUG:logEv(event)
                 if event.type == C.EV_KEY then
                     logger.dbg(string.format(
                         "key event => code: %d (%s), value: %s, time: %d.%06d",
@@ -1244,16 +1290,14 @@ function Input:waitEvent(now, deadline)
                 if handled_ev then
                     table.insert(handled, handled_ev)
                 end
-            elseif event.type == C.EV_ABS and event.code == ABS_OASIS_ORIENTATION then
-                local handled_ev = self:handleOasisOrientationEv(event)
-                if handled_ev then
-                    table.insert(handled, handled_ev)
-                end
             elseif event.type == C.EV_ABS or event.type == C.EV_SYN then
-                local handled_ev = self:handleTouchEv(event)
-                -- We don't generate an Event for *every* input event, so, make sure we don't push nil values to the array
-                if handled_ev then
-                    table.insert(handled, handled_ev)
+                local handled_evs = self:handleTouchEv(event)
+                -- handleTouchEv only returns an array of Events once it gets a SYN_REPORT,
+                -- so more often than not, we just get a nil here ;).
+                if handled_evs then
+                    for _, handled_ev in ipairs(handled_evs) do
+                        table.insert(handled, handled_ev)
+                    end
                 end
             elseif event.type == C.EV_MSC then
                 local handled_ev = self:handleMiscEv(event)
@@ -1296,23 +1340,17 @@ function Input:inhibitInput(toggle)
             self.handleKeyBoardEv = self.handlePowerManagementOnlyEv
         end
         -- And send everything else to the void
-        if not self._oasis_ev_handler then
-            self._oasis_ev_handler = self.handleOasisOrientationEv
-            self.handleOasisOrientationEv = self.voidEv
-        end
         if not self._abs_ev_handler then
             self._abs_ev_handler = self.handleTouchEv
             self.handleTouchEv = self.voidEv
         end
-        if not self._msc_ev_handler then
-            if not self.device:isPocketBook() and not self.device:isAndroid() then
-                -- NOTE: PocketBook is a special snowflake, synthetic Power events are sent as EV_MSC.
-                --       Thankfully, that's all that EV_MSC is used for on that platform.
-                -- NOTE: Android, on the other hand, handles a *lot* of critical stuff over EV_MSC,
-                --       as it's used to communicate between Android and Lua land ;).
-                self._msc_ev_handler = self.handleMiscEv
-                self.handleMiscEv = self.voidEv
-            end
+        -- NOTE: We leave handleMiscEv alone, as some platforms make extensive use of EV_MSC for critical low-level stuff:
+        --       e.g., on PocketBook, it is used to handle InkView task management events (i.e., PM);
+        --       and on Android, for the critical purpose of forwarding Android events to Lua-land.
+        --       The only thing we might want to skip in there are gyro events anyway, which we'll handle separately.
+        if not self._gyro_ev_handler then
+            self._gyro_ev_handler = self.handleGyroEv
+            self.handleGyroEv = self.voidEv
         end
         if not self._sdl_ev_handler then
             self._sdl_ev_handler = self.handleSdlEv
@@ -1332,17 +1370,13 @@ function Input:inhibitInput(toggle)
             self.handleKeyBoardEv = self._key_ev_handler
             self._key_ev_handler = nil
         end
-        if self._oasis_ev_handler then
-            self.handleOasisOrientationEv = self._oasis_ev_handler
-            self._oasis_ev_handler = nil
-        end
         if self._abs_ev_handler then
             self.handleTouchEv = self._abs_ev_handler
             self._abs_ev_handler = nil
         end
-        if self._msc_ev_handler then
-            self.handleMiscEv = self._msc_ev_handler
-            self._msc_ev_handler = nil
+        if self._gyro_ev_handler then
+            self.handleGyroEv = self._gyro_ev_handler
+            self._gyro_ev_handler = nil
         end
         if self._sdl_ev_handler then
             self.handleSdlEv = self._sdl_ev_handler

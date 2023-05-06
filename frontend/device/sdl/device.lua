@@ -60,7 +60,7 @@ local external = require("device/thirdparty"):new{
     end,
 }
 
-local Device = Generic:new{
+local Device = Generic:extend{
     model = "SDL",
     isSDL = yes,
     home_dir = os.getenv("XDG_DOCUMENTS_DIR") or os.getenv("HOME"),
@@ -105,21 +105,21 @@ local Device = Generic:new{
     window = G_reader_settings:readSetting("sdl_window", {}),
 }
 
-local AppImage = Device:new{
+local AppImage = Device:extend{
     model = "AppImage",
     hasMultitouch = no,
     hasOTAUpdates = yes,
     isDesktop = yes,
 }
 
-local Desktop = Device:new{
+local Desktop = Device:extend{
     model = SDL.getPlatform(),
     isDesktop = yes,
     canRestart = notOSX,
     hasExitOptions = notOSX,
 }
 
-local Emulator = Device:new{
+local Emulator = Device:extend{
     model = "Emulator",
     isEmulator = yes,
     hasBattery = yes,
@@ -137,7 +137,7 @@ local Emulator = Device:new{
     canStandby = no,
 }
 
-local UbuntuTouch = Device:new{
+local UbuntuTouch = Device:extend{
     model = "UbuntuTouch",
     hasFrontlight = yes,
     isDefaultFullscreen = yes,
@@ -301,10 +301,9 @@ function Device:init()
     end
 
     if portrait then
-        self.input:registerEventAdjustHook(self.input.adjustTouchSwitchXY)
         self.input:registerEventAdjustHook(
-            self.input.adjustTouchMirrorX,
-            self.screen:getScreenWidth()
+            self.input.adjustTouchSwitchAxesAndMirrorX,
+            (self.screen:getScreenWidth() - 1)
         )
     end
 
@@ -343,19 +342,42 @@ function Device:toggleFullscreen()
     end
 end
 
+function Device:setEventHandlers(UIManager)
+    if not self:canSuspend() then
+        -- If we can't suspend, we have no business even trying to, as we may not have overloaded `Device:simulateResume`.
+        -- Instead, rely on the Generic Suspend/Resume handlers.
+        return
+    end
+
+    UIManager.event_handlers.Suspend = function()
+        self:_beforeSuspend()
+        self:simulateSuspend()
+    end
+    UIManager.event_handlers.Resume = function()
+        self:simulateResume()
+        self:_afterResume()
+    end
+    UIManager.event_handlers.PowerRelease = function()
+        -- Resume if we were suspended
+        if self.screen_saver_mode then
+            UIManager.event_handlers.Resume()
+        else
+            UIManager.event_handlers.Suspend()
+        end
+    end
+end
+
 function Emulator:supportsScreensaver() return true end
 
 function Emulator:simulateSuspend()
     local Screensaver = require("ui/screensaver")
     Screensaver:setup()
     Screensaver:show()
-    self.screen_saver_mode = true
 end
 
 function Emulator:simulateResume()
     local Screensaver = require("ui/screensaver")
     Screensaver:close()
-    self.screen_saver_mode = false
 end
 
 -- fake network manager for the emulator

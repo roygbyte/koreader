@@ -15,7 +15,7 @@ local VerticalScrollBar = require("ui/widget/verticalscrollbar")
 local Input = Device.input
 local Screen = Device.screen
 
-local ScrollHtmlWidget = InputContainer:new{
+local ScrollHtmlWidget = InputContainer:extend{
     html_body = nil,
     css = nil,
     default_font_size = Screen:scaleBySize(24), -- same as infofont
@@ -79,8 +79,8 @@ function ScrollHtmlWidget:init()
 
     if Device:hasKeys() then
         self.key_events = {
-            ScrollDown = {{Input.group.PgFwd}, doc = "scroll down"},
-            ScrollUp = {{Input.group.PgBack}, doc = "scroll up"},
+            ScrollDown = { { Input.group.PgFwd } },
+            ScrollUp = { { Input.group.PgBack } },
         }
     end
 end

@@ -117,9 +117,10 @@ local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
 local Screen = Device.screen
 local T = require("ffi/util").template
+local util = require("util")
 local _ = require("gettext")
 
-local InputDialog = FocusManager:new{
+local InputDialog = FocusManager:extend{
     is_always_active = true,
     title = "",
     input = "",
@@ -429,20 +430,18 @@ function InputDialog:init()
             h = self.screen_height - keyboard_height,
         },
         ignore_if_over = "height",
-        frame
+        frame,
     }
     if Device:isTouchDevice() then -- is used to hide the keyboard with a tap outside of inputbox
-        self.ges_events = {
-            Tap = {
-                GestureRange:new{
-                    ges = "tap",
-                    range = self[1].dimen, -- screen above the keyboard
-                },
+        self.ges_events.Tap = {
+            GestureRange:new{
+                ges = "tap",
+                range = self[1].dimen, -- screen above the keyboard
             },
         }
     end
     if Device:hasKeys() then
-        self.key_events.CloseDialog = { {Device.input.group.Back}, doc = "close dialog" }
+        self.key_events.CloseDialog = { { Device.input.group.Back } }
     end
     if self._added_widgets then
         for _, widget in ipairs(self._added_widgets) do
@@ -793,46 +792,14 @@ function InputDialog:_addScrollButtons(nav_bar)
                                 {
                                     text = _("Find first"),
                                     callback = function()
-                                        self.search_value = input_dialog:getInputText()
-                                        if self.search_value ~= "" then
-                                            UIManager:close(input_dialog)
-                                            self.keyboard_hidden = keyboard_hidden_state
-                                            self:toggleKeyboard()
-                                            local msg
-                                            local char_pos = self._input_widget:searchString(self.search_value, self.case_sensitive, 1)
-                                            if char_pos > 0 then
-                                                self._input_widget:moveCursorToCharPos(char_pos)
-                                                msg = T(_("Found in line %1."), self._input_widget:getLineNums())
-                                            else
-                                                msg = _("Not found.")
-                                            end
-                                            UIManager:show(Notification:new{
-                                                text = msg,
-                                            })
-                                        end
+                                        self:findCallback(keyboard_hidden_state, input_dialog, true)
                                     end,
                                 },
                                 {
                                     text = _("Find next"),
                                     is_enter_default = true,
                                     callback = function()
-                                        self.search_value = input_dialog:getInputText()
-                                        if self.search_value ~= "" then
-                                            UIManager:close(input_dialog)
-                                            self.keyboard_hidden = keyboard_hidden_state
-                                            self:toggleKeyboard()
-                                            local msg
-                                            local char_pos = self._input_widget:searchString(self.search_value, self.case_sensitive)
-                                            if char_pos > 0 then
-                                                self._input_widget:moveCursorToCharPos(char_pos)
-                                                msg = T(_("Found in line %1."), self._input_widget:getLineNums())
-                                            else
-                                                msg = _("Not found.")
-                                            end
-                                            UIManager:show(Notification:new{
-                                                text = msg,
-                                            })
-                                        end
+                                        self:findCallback(keyboard_hidden_state, input_dialog)
                                     end,
                                 },
                             },
@@ -965,6 +932,26 @@ function InputDialog:_addScrollButtons(nav_bar)
             self:refreshButtons()
         end
     end
+end
+
+function InputDialog:findCallback(keyboard_hidden_state, input_dialog, find_first)
+    self.search_value = input_dialog:getInputText()
+    if self.search_value == "" then return end
+    UIManager:close(input_dialog)
+    self.keyboard_hidden = keyboard_hidden_state
+    self:toggleKeyboard()
+    local start_pos = find_first and 1 or self._charpos + 1
+    local char_pos = util.stringSearch(self.input, self.search_value, self.case_sensitive, start_pos)
+    local msg
+    if char_pos > 0 then
+        self._input_widget:moveCursorToCharPos(char_pos)
+        msg = T(_("Found in line %1."), self._input_widget:getLineNums())
+    else
+        msg = _("Not found.")
+    end
+    UIManager:show(Notification:new{
+        text = msg,
+    })
 end
 
 return InputDialog

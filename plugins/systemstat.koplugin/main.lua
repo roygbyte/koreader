@@ -4,6 +4,7 @@ local KeyValuePage = require("ui/widget/keyvaluepage")
 local Math = require("optmath")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
+local datetime = require("datetime")
 local time = require("ui/time")
 local util = require("util")
 local _ = require("gettext")
@@ -52,12 +53,22 @@ function SystemStat:putSeparator()
 end
 
 function SystemStat:appendCounters()
-    self:put({_("KOReader started at"), os.date("%c", time.to_s(self.start_time))})
+    local use_twelve_hour_clock = G_reader_settings:isTrue("twelve_hour_clock")
+    self:put({
+        _("KOReader started at"),
+        datetime.secondsToDateTime(time.to_s(self.start_time), use_twelve_hour_clock, true)
+    })
     if self.suspend_time then
-       self:put({_("  Last suspend time"), os.date("%c", time.to_s(self.suspend_time))})
+       self:put({
+           "  " .. _("Last suspend time"),
+           datetime.secondsToDateTime(time.to_s(self.suspend_time), use_twelve_hour_clock, true)
+        })
     end
     if self.resume_time then
-        self:put({_("  Last resume time"), os.date("%c", time.to_s(self.resume_time))})
+        self:put({
+            "  " .. _("Last resume time"),
+           datetime.secondsToDateTime(time.to_s(self.resume_time), use_twelve_hour_clock, true)
+        })
     end
     local uptime = time.boottime_or_realtime_coarse() - self.start_monotonic_time
     local suspend = 0
@@ -69,21 +80,21 @@ function SystemStat:appendCounters()
         standby = Device.total_standby_time
     end
     self:put({"  " .. _("Up time"),
-            util.secondsToClockDuration("", time.to_s(uptime), false, true, true)})
+            datetime.secondsToClockDuration("", time.to_s(uptime), false, true, true)})
     if Device:canSuspend() or Device:canStandby() then
         local awake = uptime - suspend - standby
         self:put({"  " .. _("Time spent awake"),
-            util.secondsToClockDuration("", time.to_s(awake), false, true, true)
+            datetime.secondsToClockDuration("", time.to_s(awake), false, true, true)
             .. " (" .. Math.round((awake / uptime) * 100) .. "%)"})
     end
     if Device:canSuspend() then
         self:put({"  " .. _("Time in suspend"),
-            util.secondsToClockDuration("", time.to_s(suspend), false, true, true)
+            datetime.secondsToClockDuration("", time.to_s(suspend), false, true, true)
             .. " (" .. Math.round((suspend / uptime) * 100) .. "%)"})
     end
     if Device:canStandby() then
         self:put({"  " .. _("Time in standby"),
-            util.secondsToClockDuration("", time.to_s(standby), false, true, true)
+            datetime.secondsToClockDuration("", time.to_s(standby), false, true, true)
             .. " (" .. Math.round((standby / uptime) * 100) .. "%)"})
     end
     self:put({_("Counters"), ""})
@@ -160,10 +171,10 @@ function SystemStat:appendSystemInfo()
         self:put({_("System information"), ""})
         -- @translators Ticks is a highly technical term. See https://superuser.com/a/101202 The correct translation is likely to simply be "ticks".
         self:put({_("  Total ticks (million)"),
-                 string.format("%.2f", stat.cpu.total / 1000000)})
+                 string.format("%.2f", stat.cpu.total * (1/1000000))})
         -- @translators Ticks is a highly technical term. See https://superuser.com/a/101202 The correct translation is likely to simply be "ticks".
         self:put({_("  Idle ticks (million)"),
-                 string.format("%.2f", stat.cpu.idle / 1000000)})
+                 string.format("%.2f", stat.cpu.idle * (1/1000000))})
         self:put({_("  Processor usage %"),
                  string.format("%.2f", (1 - stat.cpu.idle / stat.cpu.total) * 100)})
     end
@@ -209,7 +220,7 @@ function SystemStat:appendProcessInfo()
             self:put({_("  Processor usage %"),
                      string.format("%.2f", n1 / sys_stat.cpu.total * 100)})
         else
-            self:put({_("  Processor usage ticks (million)"), n1 / 1000000})
+            self:put({_("  Processor usage ticks (million)"), n1 * (1/1000000)})
         end
     end
 
@@ -291,7 +302,7 @@ end
 
 SystemStat:init()
 
-local SystemStatWidget = WidgetContainer:new{
+local SystemStatWidget = WidgetContainer:extend{
     name = "systemstat",
 }
 

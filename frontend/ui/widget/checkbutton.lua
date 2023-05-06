@@ -27,7 +27,7 @@ local UIManager = require("ui/uimanager")
 local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
 
-local CheckButton = InputContainer:new{
+local CheckButton = InputContainer:extend{
     callback = nil,
     hold_callback = nil,
     checkable = true, -- empty space when false
@@ -91,6 +91,7 @@ function CheckButton:initCheckButton(checked)
         background = self.background,
         margin = 0,
         padding = 0,
+        show_parent = self.show_parent or self,
         self._horizontalgroup,
     }
     self.dimen = self._frame:getSize()
@@ -102,14 +103,12 @@ function CheckButton:initCheckButton(checked)
                 ges = "tap",
                 range = self.dimen,
             },
-            doc = "Tap Button",
         },
         HoldCheckButton = {
             GestureRange:new{
                 ges = "hold",
                 range = self.dimen,
             },
-            doc = "Hold Button",
         },
         -- Safe-guard for when used inside a MovableContainer
         HoldReleaseCheckButton = {
@@ -117,7 +116,6 @@ function CheckButton:initCheckButton(checked)
                 ges = "hold_release",
                 range = self.dimen,
             },
-            doc = "Hold Release Button",
         }
     }
 end

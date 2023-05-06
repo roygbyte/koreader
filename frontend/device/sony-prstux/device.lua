@@ -9,7 +9,7 @@ require("ffi/linux_input_h")
 local function yes() return true end
 local function no() return false end
 
-local SonyPRSTUX = Generic:new{
+local SonyPRSTUX = Generic:extend{
     model = "Sony PRSTUX",
     isSonyPRSTUX = yes,
     hasKeys = yes,
@@ -64,7 +64,7 @@ function SonyPRSTUX:init()
     self.input.open("fake_events") -- usb plug-in/out and charging/not-charging
     self.input:registerEventAdjustHook(adjustTouchEvt)
 
-    local rotation_mode = self.screen.ORIENTATION_LANDSCAPE_ROTATED
+    local rotation_mode = self.screen.DEVICE_ROTATED_COUNTER_CLOCKWISE
     self.screen.native_rotation_mode = rotation_mode
     self.screen.cur_rotation_mode = rotation_mode
 
@@ -91,23 +91,21 @@ end
 
 function SonyPRSTUX:intoScreenSaver()
     local Screensaver = require("ui/screensaver")
-    if self.screen_saver_mode == false then
+    if not self.screen_saver_mode then
         Screensaver:setup()
         Screensaver:show()
     end
     self.powerd:beforeSuspend()
-    self.screen_saver_mode = true
 end
 
 function SonyPRSTUX:outofScreenSaver()
-    if self.screen_saver_mode == true then
+    if self.screen_saver_mode then
         local Screensaver = require("ui/screensaver")
         Screensaver:close()
         local UIManager = require("ui/uimanager")
         UIManager:nextTick(function() UIManager:setDirty("all", "full") end)
     end
     self.powerd:afterResume()
-    self.screen_saver_mode = false
 end
 
 function SonyPRSTUX:suspend()
@@ -119,11 +117,11 @@ function SonyPRSTUX:resume()
 end
 
 function SonyPRSTUX:powerOff()
-    os.execute("poweroff")
+    os.execute("sleep 1 && poweroff &")
 end
 
 function SonyPRSTUX:reboot()
-    os.execute("reboot")
+    os.execute("sleep 1 && reboot &")
 end
 
 function SonyPRSTUX:usbPlugIn()
@@ -188,8 +186,58 @@ function SonyPRSTUX:getDeviceModel()
     return ffi.string("PRS-T2")
 end
 
+function SonyPRSTUX:setEventHandlers(UIManager)
+    UIManager.event_handlers.Suspend = function()
+        self:_beforeSuspend()
+        self:intoScreenSaver()
+        self:suspend()
+    end
+    UIManager.event_handlers.Resume = function()
+        self:resume()
+        self:outofScreenSaver()
+        self:_afterResume()
+    end
+    UIManager.event_handlers.PowerPress = function()
+        UIManager:scheduleIn(2, UIManager.poweroff_action)
+    end
+    UIManager.event_handlers.PowerRelease = function()
+        if not UIManager._entered_poweroff_stage then
+            UIManager:unschedule(UIManager.poweroff_action)
+            -- resume if we were suspended
+            if self.screen_saver_mode then
+                UIManager.event_handlers.Resume()
+            else
+                UIManager.event_handlers.Suspend()
+            end
+        end
+    end
+    UIManager.event_handlers.Charging = function()
+        self:_beforeCharging()
+    end
+    UIManager.event_handlers.NotCharging = function()
+        self:_afterNotCharging()
+    end
+    UIManager.event_handlers.UsbPlugIn = function()
+        if self.screen_saver_mode then
+            self:resume()
+            self:outofScreenSaver()
+            self:_afterResume()
+        end
+        self:usbPlugIn()
+    end
+    UIManager.event_handlers.UsbPlugOut = function()
+        self:usbPlugOut()
+    end
+    UIManager.event_handlers.__default__ = function(input_event)
+        -- Same as in Kobo: we want to ignore keys during suspension
+        if not self.screen_saver_mode then
+            UIManager:sendEvent(input_event)
+        end
+    end
+end
+
 -- For Sony PRS-T2
-local SonyPRSTUX_T2 = SonyPRSTUX:new{
+local SonyPRSTUX_T2 = SonyPRSTUX:extend{
     isTouchDevice = yes,
     hasKeys = yes,
     hasFrontlight = no,

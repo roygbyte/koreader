@@ -133,7 +133,7 @@ end
 --- Converts an fts time to a Lua (decimal) number (sec.usecs) (accurate to the ms, rounded to 4 decimal places)
 function time.to_number(time_fts)
     -- Round to 4 decimal places
-    return math.floor(time.to_s(time_fts) * 10000 + 0.5) / 10000
+    return math.floor(time.to_s(time_fts) * 10000 + 0.5) * (1/10000)
 end
 
 --- Converts an fts to a Lua (int) number (resolution: 1µs)
@@ -171,7 +171,7 @@ end
 function time.split_s_us(time_fts)
     if not time_fts then return nil, nil end
     local sec = math.floor(time_fts * FTS2S)
-    local usec = math.floor(time_fts - sec * S2FTS) * FTS2US
+    local usec = math.floor((time_fts - sec * S2FTS) * FTS2US)
     -- Seconds and µs
     return sec, usec
 end

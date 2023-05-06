@@ -1,14 +1,13 @@
 local ConfigDialog = require("ui/widget/configdialog")
 local Device = require("device")
 local Event = require("ui/event")
-local Geom = require("ui/geometry")
 local InputContainer = require("ui/widget/container/inputcontainer")
 local UIManager = require("ui/uimanager")
 local CreOptions = require("ui/data/creoptions")
 local KoptOptions = require("ui/data/koptoptions")
 local _ = require("gettext")
 
-local ReaderConfig = InputContainer:new{
+local ReaderConfig = InputContainer:extend{
     last_panel_index = 1,
 }
 
@@ -20,21 +19,33 @@ function ReaderConfig:init()
     end
     self.configurable:loadDefaults(self.options)
 
-    if not self.dimen then self.dimen = Geom:new{} end
-    if Device:hasKeys() then
-        self.key_events = {
-            ShowConfigMenu = { {{"Press","AA"}}, doc = "show config dialog" },
-        }
-    end
+    self:registerKeyEvents()
     self:initGesListener()
     if G_reader_settings:has("activate_menu") then
         self.activation_menu = G_reader_settings:readSetting("activate_menu")
     else
         self.activation_menu = "swipe_tap"
     end
+
+    -- delegate gesture listener to ReaderUI, NOP our own
+    self.ges_events = nil
 end
 
+function ReaderConfig:onGesture() end
+
+function ReaderConfig:registerKeyEvents()
+    if Device:hasKeys() then
+        self.key_events.ShowConfigMenu = { { { "Press", "AA" } } }
+    end
+end
+
+ReaderConfig.onPhysicalKeyboardConnected = ReaderConfig.registerKeyEvents
+
 function ReaderConfig:initGesListener()
+    if not Device:isTouchDevice() then return end
+
+    local DTAP_ZONE_CONFIG = G_defaults:readSetting("DTAP_ZONE_CONFIG")
+    local DTAP_ZONE_CONFIG_EXT = G_defaults:readSetting("DTAP_ZONE_CONFIG_EXT")
     self.ui:registerTouchZones({
         {
             id = "readerconfigmenu_tap",
@@ -116,7 +127,6 @@ end
 
 function ReaderConfig:onShowConfigMenu()
     self.config_dialog = ConfigDialog:new{
-        dimen = self.dimen:copy(),
         document = self.document,
         ui = self.ui,
         configurable = self.configurable,

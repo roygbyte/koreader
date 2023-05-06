@@ -67,7 +67,7 @@ local external = require("device/thirdparty"):new{
     end,
 }
 
-local Device = Generic:new{
+local Device = Generic:extend{
     isAndroid = yes,
     model = android.prop.product,
     hasKeys = yes,
@@ -111,29 +111,23 @@ local Device = Generic:new{
             android.dictLookup(text, app, action)
         end
     end,
-
-    -- Android is very finicky, and the LuaJIT allocator has a tremendously hard time getting the system
-    -- to allocate memory for it in the very specific memory range it requires to store generated code (mcode).
-    -- Failure to do so at runtime (mcode_alloc) will *tank* performance
-    -- (much worse than if the JIT were simply disabled).
-    -- The first line of defense is left to android-luajit-launcher,
-    -- which will try to grab the full mcode region in one go right at startup.
-    -- The second line of defense is *this* flag, which disables the JIT in a few code-hungry modules,
-    -- but not necessarily performance critical ones, to hopefully limit the amount of mcode memory
-    -- required for those modules where it *really* matters (e.g., ffi/blitbuffer.lua).
-    -- This is also why we try to actually avoid entering actual loops in the Lua blitter on Android,
-    -- and instead attempt to do most of everything via the C implementation.
-    -- NOTE: Since https://github.com/koreader/android-luajit-launcher/pull/283, we've patched LuaJIT
-    --       to ensure that the initial mcode alloc works, and sticks around, which is why this is no longer enabled.
-    should_restrict_JIT = false,
 }
 
 function Device:init()
     self.screen = require("ffi/framebuffer_android"):new{device = self, debug = logger.dbg}
     self.powerd = require("device/android/powerd"):new{device = self}
+
+    local event_map = require("device/android/event_map")
+
+    if android.prop.is_tolino then
+        -- dpad left/right as page back/forward
+        event_map[21] = "LPgBack"
+        event_map[22] = "LPgFwd"
+    end
+
     self.input = require("device/input"):new{
         device = self,
-        event_map = require("device/android/event_map"),
+        event_map = event_map,
         handleMiscEv = function(this, ev)
             local Event = require("ui/event")
             local UIManager = require("ui/uimanager")
@@ -209,7 +203,7 @@ function Device:init()
                 end
             elseif ev.code == C.APP_CMD_PAUSE then
                 if not android.prop.brokenLifecycle then
-                    UIManager:broadcastEvent(Event:new("Suspend"))
+                    UIManager:broadcastEvent(Event:new("RequestSuspend"))
                 end
             elseif ev.code == C.AEVENT_POWER_CONNECTED then
                 UIManager:broadcastEvent(Event:new("Charging"))
@@ -390,7 +384,8 @@ function Device:_toggleStatusBarVisibility()
         -- reset touchTranslate to normal
         self.input:registerEventAdjustHook(
             self.input.adjustTouchTranslate,
-            {x = 0 + self.viewport.x, y = 0 + self.viewport.y})
+            {x = 0 + self.viewport.x, y = 0 + self.viewport.y}
+        )
     end
 
     local viewport = Geom:new{x=0, y=statusbar_height, w=width, h=new_height}
@@ -401,7 +396,8 @@ function Device:_toggleStatusBarVisibility()
     if is_fullscreen and self.viewport then
         self.input:registerEventAdjustHook(
             self.input.adjustTouchTranslate,
-            {x = 0 - self.viewport.x, y = 0 - self.viewport.y})
+            {x = 0 - self.viewport.x, y = 0 - self.viewport.y}
+        )
     end
 
     self.fullscreen = is_fullscreen
@@ -428,8 +424,8 @@ function Device:info()
     local is_eink, eink_platform = android.isEink()
     local product_type = android.getPlatformName()
 
-    local common_text = T(_("%1\n\nOS: Android %2, api %3\nBuild flavor: %4\n"),
-        android.prop.product, getCodename(), Device.firmware_rev, android.prop.flavor)
+    local common_text = T(_("%1\n\nOS: Android %2, api %3 on %4\nBuild flavor: %5\n"),
+        android.prop.product, getCodename(), Device.firmware_rev, jit.arch, android.prop.flavor)
 
     local platform_text = ""
     if product_type ~= "android" then
@@ -454,7 +450,7 @@ function Device:test()
 end
 
 function Device:exit()
-    android.LOGI(string.format("Stopping %s main activity", android.prop.name));
+    android.LOGI(string.format("Stopping %s main activity", android.prop.name))
     android.lib.ANativeActivity_finish(android.app.activity)
 end
 

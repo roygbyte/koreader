@@ -4,6 +4,7 @@ Widget that displays an informational message.
 It vanishes on key press or after a given timeout.
 
 Example:
+    local InfoMessage = require("ui/widget/infomessage")
     local UIManager = require("ui/uimanager")
     local _ = require("gettext")
     local Screen = require("device").screen
@@ -18,8 +19,7 @@ Example:
         show_icon = false,
         timeout = 5,  -- This widget will vanish in 5 seconds.
     }
-    UIManager:show(sample_input)
-    sample_input:onShowKeyboard()
+    UIManager:show(sample)
 ]]
 
 local Blitbuffer = require("ffi/blitbuffer")
@@ -44,7 +44,7 @@ local _ = require("gettext")
 local Input = Device.input
 local Screen = Device.screen
 
-local InfoMessage = InputContainer:new{
+local InfoMessage = InputContainer:extend{
     modal = true,
     face = Font:getFace("infofont"),
     text = "",
@@ -79,10 +79,7 @@ local InfoMessage = InputContainer:new{
 function InfoMessage:init()
     if self.dismissable then
         if Device:hasKeys() then
-            self.key_events = {
-                AnyKeyPressed = { { Input.group.Any },
-                    seqtext = "any key", doc = "close dialog" }
-            }
+            self.key_events.AnyKeyPressed = { { Input.group.Any } }
         end
         if Device:isTouchDevice() then
             self.ges_events.TapClose = {
@@ -280,18 +277,12 @@ function InfoMessage:dismiss()
     UIManager:close(self)
 end
 
-function InfoMessage:onAnyKeyPressed()
-    self:dismiss()
-    if self.readonly ~= true then
-        return true
-    end
-end
-
 function InfoMessage:onTapClose()
     self:dismiss()
     if self.readonly ~= true then
         return true
     end
 end
+InfoMessage.onAnyKeyPressed = InfoMessage.onTapClose
 
 return InfoMessage

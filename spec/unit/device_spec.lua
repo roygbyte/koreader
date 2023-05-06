@@ -2,6 +2,7 @@ describe("device module", function()
     -- luacheck: push ignore
     local mock_fb, mock_input
     local iopen = io.open
+    local ipopen = io.popen
     local osgetenv = os.getenv
     local ffi, C
 
@@ -16,6 +17,7 @@ describe("device module", function()
                     getRotationMode = function() return 0 end,
                     getScreenMode = function() return "portrait" end,
                     setRotationMode = function() end,
+                    scaleByDPI = function(this, dp) return math.ceil(dp * this:getDPI() / 160) end,
                 }
             end
         }
@@ -42,13 +44,14 @@ describe("device module", function()
 
         os.getenv = osgetenv
         io.open = iopen
+        io.popen = ipopen
     end)
 
     describe("kobo", function()
-        local TimeVal
+        local time
         local NickelConf
         setup(function()
-            TimeVal = require("ui/timeval")
+            time = require("ui/time")
             NickelConf = require("device/kobo/nickel_conf")
         end)
 
@@ -71,10 +74,12 @@ describe("device module", function()
             assert.is.same("Kobo_dahlia", kobo_dev.model)
         end)
 
-        it("should setup eventAdjustHooks properly for input in trilogy", function()
+        it("should setup eventAdjustHooks properly for input on trilogy C", function()
             os.getenv.invokes(function(key)
                 if key == "PRODUCT" then
                     return "trilogy"
+                elseif key == "MODEL_NUMBER" then
+                    return "320"
                 else
                     return osgetenv(key)
                 end
@@ -85,23 +90,20 @@ describe("device module", function()
             kobo_dev:init()
             local Screen = kobo_dev.screen
 
-            assert.is.same("Kobo_trilogy", kobo_dev.model)
-            assert.truthy(kobo_dev:needsTouchScreenProbe())
-            G_reader_settings:saveSetting("kobo_touch_switch_xy", true)
-            kobo_dev:touchScreenProbe()
+            assert.is.same("Kobo_trilogy_C", kobo_dev.model)
             local x, y = Screen:getWidth()-5, 10
             -- mirror x, then switch_xy
             local ev_x = {
                 type = C.EV_ABS,
                 code = C.ABS_X,
                 value = y,
-                time = TimeVal:realtime(),
+                time = time:realtime(),
             }
             local ev_y = {
                 type = C.EV_ABS,
                 code = C.ABS_Y,
-                value = Screen:getWidth()-x,
-                time = TimeVal:realtime(),
+                value = Screen:getWidth() - 1 - x,
+                time = time:realtime(),
             }
 
             kobo_dev.input:eventAdjustHook(ev_x)
@@ -124,6 +126,8 @@ describe("device module", function()
             os.getenv.invokes(function(key)
                 if key == "PRODUCT" then
                     return "trilogy"
+                elseif key == "MODEL_NUMBER" then
+                    return "320"
                 else
                     return osgetenv(key)
                 end
@@ -134,9 +138,7 @@ describe("device module", function()
             kobo_dev:init()
             local Screen = kobo_dev.screen
 
-            assert.is.same("Kobo_trilogy", kobo_dev.model)
-            assert.truthy(kobo_dev:needsTouchScreenProbe())
-            kobo_dev:touchScreenProbe()
+            assert.is.same("Kobo_trilogy_C", kobo_dev.model)
             local x, y = Screen:getWidth()-5, 10
             local ev_x = {
                 type = C.EV_ABS,
@@ -147,7 +149,7 @@ describe("device module", function()
             local ev_y = {
                 type = C.EV_ABS,
                 code = C.ABS_Y,
-                value = Screen:getWidth()-x,
+                value = Screen:getWidth() - 1 - x,
                 time = {sec = 1000}
             }
 
@@ -160,36 +162,6 @@ describe("device module", function()
 
             -- reset eventAdjustHook
             kobo_dev.input.eventAdjustHook = function() end
-        end)
-
-        it("should flush book settings before suspend", function()
-            local sample_pdf = "spec/front/unit/data/tall.pdf"
-            local ReaderUI = require("apps/reader/readerui")
-            local Device = require("device")
-
-            NickelConf.frontLightLevel.get.returns(1)
-            NickelConf.frontLightState.get.returns(0)
-
-            local UIManager = require("ui/uimanager")
-            stub(Device, "suspend")
-            stub(Device.powerd, "beforeSuspend")
-            stub(Device, "isKobo")
-
-            Device.isKobo.returns(true)
-            UIManager:init()
-
-            ReaderUI:doShowReader(sample_pdf)
-            local readerui = ReaderUI._getRunningInstance()
-            stub(readerui, "onFlushSettings")
-            UIManager.event_handlers["PowerPress"]()
-            UIManager.event_handlers["PowerRelease"]()
-            assert.stub(readerui.onFlushSettings).was_called()
-
-            Device.suspend:revert()
-            Device.powerd.beforeSuspend:revert()
-            Device.isKobo:revert()
-            readerui.onFlushSettings:revert()
-            readerui:onClose()
         end)
     end)
 
@@ -278,7 +250,7 @@ describe("device module", function()
                         usec = 450565,
                         sec = 1471081881
                     },
-                    code = 24, -- C.ABS_PRESSURE -> ABS_OASIS_ORIENTATION
+                    code = 24, -- C.ABS_PRESSURE
                     value = 16
                 }
             })
@@ -296,6 +268,170 @@ describe("device module", function()
 
             mock_ffi_input.waitForEvent:revert()
             UIManager.onRotation:revert()
+        end)
+    end)
+
+    describe("Flush book Settings for", function()
+        it("Kobo", function()
+            os.getenv.invokes(function(key)
+                if key == "PRODUCT" then
+                    return "trilogy"
+                else
+                    return osgetenv(key)
+                end
+            end)
+            local sample_pdf = "spec/front/unit/data/tall.pdf"
+            local ReaderUI = require("apps/reader/readerui")
+            local device_to_test = require("device/kobo/device")
+            local Device = require("device")
+            Device.setEventHandlers = device_to_test.setEventHandlers
+
+            local UIManager = require("ui/uimanager")
+            stub(Device, "suspend")
+            stub(Device.powerd, "beforeSuspend")
+            stub(Device, "isKobo")
+
+            Device.isKobo.returns(true)
+            UIManager:init()
+
+            ReaderUI:doShowReader(sample_pdf)
+            local readerui = ReaderUI._getRunningInstance()
+            stub(readerui, "onFlushSettings")
+            UIManager.event_handlers.PowerPress()
+            UIManager.event_handlers.PowerRelease()
+            assert.stub(readerui.onFlushSettings).was_called()
+
+            Device.suspend:revert()
+            Device.powerd.beforeSuspend:revert()
+            Device.isKobo:revert()
+            readerui.onFlushSettings:revert()
+            Device.screen_saver_mode = false
+            readerui:onClose()
+        end)
+
+        it("Cervantes", function()
+            io.popen = function(filename, mode)
+                if filename:find("/usr/bin/ntxinfo") then
+                    return {
+                        read = function()
+                            return 68 -- Cervantes4
+                        end,
+                        close = function() end
+                    }
+                else
+                    return ipopen(filename, mode)
+                end
+            end
+
+            local sample_pdf = "spec/front/unit/data/tall.pdf"
+            local ReaderUI = require("apps/reader/readerui")
+            local Device = require("device")
+            local device_to_test = require("device/cervantes/device")
+            Device.setEventHandlers = device_to_test.setEventHandlers
+
+            local UIManager = require("ui/uimanager")
+
+            stub(Device, "suspend")
+            stub(Device.powerd, "beforeSuspend")
+            stub(Device, "isCervantes")
+
+            Device.isCervantes.returns(true)
+            UIManager:init()
+
+            ReaderUI:doShowReader(sample_pdf)
+            local readerui = ReaderUI._getRunningInstance()
+            stub(readerui, "onFlushSettings")
+            UIManager.event_handlers.PowerPress()
+            UIManager.event_handlers.PowerRelease()
+            assert.stub(readerui.onFlushSettings).was_called()
+
+            Device.suspend:revert()
+            Device.powerd.beforeSuspend:revert()
+            Device.isCervantes:revert()
+            readerui.onFlushSettings:revert()
+            Device.screen_saver_mode = false
+            readerui:onClose()
+        end)
+
+        it("SDL", function()
+            local sample_pdf = "spec/front/unit/data/tall.pdf"
+            local ReaderUI = require("apps/reader/readerui")
+            local Device = require("device")
+            local device_to_test = require("device/sdl/device")
+            Device.setEventHandlers = device_to_test.setEventHandlers
+
+            local UIManager = require("ui/uimanager")
+
+            stub(Device, "suspend")
+            stub(Device.powerd, "beforeSuspend")
+            stub(Device, "isSDL")
+
+            Device.isSDL.returns(true)
+            UIManager:init()
+
+            ReaderUI:doShowReader(sample_pdf)
+            local readerui = ReaderUI._getRunningInstance()
+            stub(readerui, "onFlushSettings")
+            UIManager.event_handlers.PowerPress()
+            UIManager.event_handlers.PowerRelease()
+            assert.stub(readerui.onFlushSettings).was_called()
+
+            Device.suspend:revert()
+            Device.powerd.beforeSuspend:revert()
+            Device.isSDL:revert()
+            readerui.onFlushSettings:revert()
+            Device.screen_saver_mode = false
+            readerui:onClose()
+        end)
+
+        it("Remarkable", function()
+            io.open = function(filename, mode)
+                if filename == "/usr/bin/xochitl" then
+                    return {
+                        read = function()
+                            return true
+                        end,
+                        close = function() end
+                    }
+                elseif filename == "/sys/devices/soc0/machine" then
+                    return {
+                        read = function()
+                            return "reMarkable", "generic"
+                        end,
+                        close = function() end
+                    }
+                else
+                    return iopen(filename, mode)
+                end
+            end
+            local sample_pdf = "spec/front/unit/data/tall.pdf"
+            local ReaderUI = require("apps/reader/readerui")
+            local Device = require("device")
+            local device_to_test = require("device/remarkable/device")
+            Device.setEventHandlers = device_to_test.setEventHandlers
+
+            local UIManager = require("ui/uimanager")
+
+            stub(Device, "suspend")
+            stub(Device.powerd, "beforeSuspend")
+            stub(Device, "isRemarkable")
+
+            Device.isRemarkable.returns(true)
+            UIManager:init()
+
+            ReaderUI:doShowReader(sample_pdf)
+            local readerui = ReaderUI._getRunningInstance()
+            stub(readerui, "onFlushSettings")
+            UIManager.event_handlers.PowerPress()
+            UIManager.event_handlers.PowerRelease()
+            assert.stub(readerui.onFlushSettings).was_called()
+
+            Device.suspend:revert()
+            Device.powerd.beforeSuspend:revert()
+            Device.isRemarkable:revert()
+            readerui.onFlushSettings:revert()
+            Device.screen_saver_mode = false
+            readerui:onClose()
         end)
     end)
     -- luacheck: pop

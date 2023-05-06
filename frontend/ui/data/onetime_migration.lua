@@ -7,7 +7,7 @@ local lfs = require("libs/libkoreader-lfs")
 local logger = require("logger")
 
 -- Date at which the last migration snippet was added
-local CURRENT_MIGRATION_DATE = 20220625
+local CURRENT_MIGRATION_DATE = 20221027
 
 -- Retrieve the date of the previous migration, if any
 local last_migration_date = G_reader_settings:readSetting("last_migration_date", 0)
@@ -414,6 +414,85 @@ if last_migration_date < 20220625 then
             end
         end
         os.rename(data_dir .. "/patch.lua", patch_dir .. "/1-patch.lua")
+    end
+end
+
+-- OPDS, same as above
+if last_migration_date < 20220819 then
+    logger.info("Performing one-time migration for 20220819")
+
+    local opds_servers = G_reader_settings:readSetting("opds_servers")
+    if opds_servers then
+        -- Update deprecated URLs
+        for i = #opds_servers, 1, -1 do
+            local server = opds_servers[i]
+
+            if server.url == "https://standardebooks.org/opds" then
+                server.url = "https://standardebooks.org/feeds/opds"
+            end
+        end
+        G_reader_settings:saveSetting("opds_servers", opds_servers)
+    end
+end
+
+-- Fontlist, cache format change (#9513)
+if last_migration_date < 20220914 then
+    logger.info("Performing one-time migration for 20220914")
+
+    local cache_path = DataStorage:getDataDir() .. "/cache/fontlist"
+    local ok, err = os.remove(cache_path .. "/fontinfo.dat")
+    if not ok then
+       logger.warn("os.remove:", err)
+    end
+end
+
+-- The great defaults.persistent.lua migration to LuaDefaults (#9546)
+if last_migration_date < 20220930 then
+    logger.info("Performing one-time migration for 20220930")
+
+    local defaults_path = DataStorage:getDataDir() .. "/defaults.persistent.lua"
+    local defaults = {}
+    local load_defaults, err = loadfile(defaults_path, "t", defaults)
+    if not load_defaults then
+        logger.warn("loadfile:", err)
+    else
+        -- User input, there may be syntax errors, go through pcall like we used to.
+        local ok, perr = pcall(load_defaults)
+        if not ok then
+            logger.warn("Failed to execute defaults.persistent.lua:", perr)
+            -- Don't keep *anything* around, to make it more obvious that something went screwy...
+            logger.warn("/!\\ YOU WILL HAVE TO MIGRATE YOUR CUSTOM defaults.lua SETTINGS MANUALLY /!\\")
+            defaults = {}
+        end
+    end
+
+    for k, v in pairs(defaults) do
+        -- Don't migrate deprecated settings
+        if G_defaults:has(k) then
+            G_defaults:saveSetting(k, v)
+        end
+    end
+    -- Handle NETWORK_PROXY & STARDICT_DATA_DIR, which default to nil (and as such don't actually exist in G_defaults).
+    G_defaults:saveSetting("NETWORK_PROXY", defaults.NETWORK_PROXY)
+    G_defaults:saveSetting("STARDICT_DATA_DIR", defaults.STARDICT_DATA_DIR)
+
+    G_defaults:flush()
+
+    local archived_path = DataStorage:getDataDir() .. "/defaults.legacy.lua"
+    local ok
+    ok, err = os.rename(defaults_path, archived_path)
+    if not ok then
+       logger.warn("os.rename:", err)
+    end
+end
+
+-- Extend the 20220205 hack to *all* the devices flagged as unreliable...
+if last_migration_date < 20221027 then
+    logger.info("Performing one-time migration for 20221027")
+
+    local Device = require("device")
+    if Device:isKobo() and not Device:hasReliableMxcWaitFor() then
+        G_reader_settings:makeFalse("followed_link_marker")
     end
 end
 

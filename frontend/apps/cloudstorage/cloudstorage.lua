@@ -11,6 +11,7 @@ local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
 local LuaSettings = require("luasettings")
 local Menu = require("ui/widget/menu")
+local NetworkMgr = require("ui/network/manager")
 local PathChooser = require("ui/widget/pathchooser")
 local UIManager = require("ui/uimanager")
 local WebDav = require("apps/cloudstorage/webdav")
@@ -22,14 +23,6 @@ local Screen = require("device").screen
 local T = require("ffi/util").template
 
 local CloudStorage = Menu:extend{
-    cloud_servers = {
-        {
-            text = _("Add new cloud storage"),
-            title = _("Choose cloud type"),
-            url = "add",
-            editable = false,
-        },
-    },
     no_title = false,
     show_parent = nil,
     is_popout = false,
@@ -139,14 +132,30 @@ function CloudStorage:selectCloudType()
     return true
 end
 
+function CloudStorage:generateDropBoxAccessToken()
+    if self.username or self.address == nil or self.address == "" then
+        -- short-lived token has been generated already in this session
+        -- or we have long-lived token in self.password
+        return true
+    else
+        local token = DropBox:getAccessToken(self.password, self.address)
+        if token then
+            self.password = token -- short-lived token
+            self.username = true -- flag
+            return true
+        end
+    end
+end
+
 function CloudStorage:openCloudServer(url)
     local tbl, e
-    local NetworkMgr = require("ui/network/manager")
     if self.type == "dropbox" then
         if NetworkMgr:willRerunWhenOnline(function() self:openCloudServer(url) end) then
             return
         end
-        tbl, e = DropBox:run(url, self.password, self.choose_folder_mode)
+        if self:generateDropBoxAccessToken() then
+            tbl, e = DropBox:run(url, self.password, self.choose_folder_mode)
+        end
     elseif self.type == "ftp" then
         if NetworkMgr:willRerunWhenConnected(function() self:openCloudServer(url) end) then
             return
@@ -156,11 +165,11 @@ function CloudStorage:openCloudServer(url)
         if NetworkMgr:willRerunWhenConnected(function() self:openCloudServer(url) end) then
             return
         end
-        tbl, e = WebDav:run(self.address, self.username, self.password, url)
+        tbl, e = WebDav:run(self.address, self.username, self.password, url, self.choose_folder_mode)
     end
     if tbl then
         self:switchItemTable(url, tbl)
-        if self.type == "dropbox" then
+        if self.type == "dropbox" or self.type == "webdav" then
             self.onLeftButtonTap = function()
                 self:showPlusMenu(url)
             end
@@ -260,6 +269,7 @@ function CloudStorage:downloadFile(item)
                             {
                                 {
                                     text = _("Cancel"),
+                                    id = "close",
                                     callback = function()
                                         UIManager:close(input_dialog)
                                     end,
@@ -423,31 +433,38 @@ function CloudStorage:onMenuHold(item)
 end
 
 function CloudStorage:synchronizeCloud(item)
+    if NetworkMgr:willRerunWhenOnline(function() self:synchronizeCloud(item) end) then
+        return
+    end
+    self.password = item.password
+    self.address = item.address
     local Trapper = require("ui/trapper")
     Trapper:wrap(function()
         Trapper:setPausedText("Download paused.\nDo you want to continue or abort downloading files?")
-        local ok, downloaded_files, failed_files = pcall(self.downloadListFiles, self, item)
-        if ok and downloaded_files then
-            if not failed_files then failed_files = 0 end
-            local text
-            if downloaded_files == 0 and failed_files == 0 then
-                text = _("No files to download from Dropbox.")
-            else
-                text = T(N_("Successfully downloaded 1 file from Dropbox to local storage.", "Successfully downloaded %1 files from Dropbox to local storage.", downloaded_files), downloaded_files)
-                if failed_files > 0 then
-                    text = text .. "\n" .. T(N_("Failed to download 1 file.", "Failed to download %1 files.", failed_files), failed_files)
+        if self:generateDropBoxAccessToken() then
+            local ok, downloaded_files, failed_files = pcall(self.downloadListFiles, self, item)
+            if ok and downloaded_files then
+                if not failed_files then failed_files = 0 end
+                local text
+                if downloaded_files == 0 and failed_files == 0 then
+                    text = _("No files to download from Dropbox.")
+                else
+                    text = T(N_("Successfully downloaded 1 file from Dropbox to local storage.", "Successfully downloaded %1 files from Dropbox to local storage.", downloaded_files), downloaded_files)
+                    if failed_files > 0 then
+                        text = text .. "\n" .. T(N_("Failed to download 1 file.", "Failed to download %1 files.", failed_files), failed_files)
+                    end
                 end
+                UIManager:show(InfoMessage:new{
+                    text = text,
+                    timeout = 3,
+                })
+            else
+                Trapper:reset() -- close any last widget not cleaned if error
+                UIManager:show(InfoMessage:new{
+                    text = _("No files to download from Dropbox.\nPlease check your configuration and connection."),
+                    timeout = 3,
+                })
             end
-            UIManager:show(InfoMessage:new{
-                text = text,
-                timeout = 3,
-            })
-        else
-            Trapper:reset() -- close any last widget not cleaned if error
-            UIManager:show(InfoMessage:new{
-                text = _("No files to download from Dropbox.\nPlease check your configuration and connection."),
-                timeout = 3,
-            })
         end
     end)
 end
@@ -468,7 +485,7 @@ function CloudStorage:downloadListFiles(item)
             end
         end
     end
-    local remote_files = DropBox:showFiles(item.sync_source_folder, item.password)
+    local remote_files = DropBox:showFiles(item.sync_source_folder, self.password)
     if #remote_files == 0 then
         UI:clear()
         return false
@@ -499,7 +516,7 @@ function CloudStorage:downloadListFiles(item)
             if not go_on then
                 break
             end
-            response = DropBox:downloadFileNoUI(file.url, item.password, item.sync_dest_folder .. "/" .. file.text)
+            response = DropBox:downloadFileNoUI(file.url, self.password, item.sync_dest_folder .. "/" .. file.text)
             if response then
                 success_files = success_files + 1
             else
@@ -524,14 +541,14 @@ function CloudStorage:synchronizeSettings(item)
                     text = _("Choose Dropbox folder"),
                     callback = function()
                         UIManager:close(syn_dialog)
-                        require("ui/cloudmgr"):new{
+                        require("ui/downloadmgr"):new{
                             item = item,
                             onConfirm = function(path)
                                 self:updateSyncFolder(item, path)
                                 item.sync_source_folder = path
                                 self:synchronizeSettings(item)
                             end,
-                        }:chooseDir()
+                        }:chooseCloudDir()
                     end,
                 },
             },
@@ -624,7 +641,11 @@ function CloudStorage:uploadFile(url)
                 end)
                 local url_base = url ~= "/" and url or ""
                 UIManager:tickAfterNext(function()
-                    DropBox:uploadFile(url_base, self.password, file_path, callback_close)
+                    if self.type == "dropbox" then
+                        DropBox:uploadFile(url_base, self.password, file_path, callback_close)
+                    elseif self.type == "webdav" then
+                        WebDav:uploadFile(url_base, self.address, self.username, self.password, file_path, callback_close)
+                    end
                 end)
             end
         end
@@ -662,7 +683,11 @@ function CloudStorage:createFolder(url)
                             end
                             self:openCloudServer(url)
                         end
-                        DropBox:createFolder(url_base, self.password, folder_name, callback_close)
+                        if self.type == "dropbox" then
+                            DropBox:createFolder(url_base, self.password, folder_name, callback_close)
+                        elseif self.type == "webdav" then
+                            WebDav:createFolder(url_base, self.address, self.username, self.password, folder_name, callback_close)
+                        end
                     end,
                 },
             }
@@ -686,8 +711,9 @@ function CloudStorage:configCloud(type)
             table.insert(cs_servers,{
                 name = fields[1],
                 password = fields[2],
+                address = fields[3],
+                url = fields[4],
                 type = "dropbox",
-                url = "/"
             })
         elseif type == "ftp" then
             table.insert(cs_servers,{
@@ -732,6 +758,8 @@ function CloudStorage:editCloudServer(item)
                 if server.name == updated_config.text and server.password == updated_config.password then
                     server.name = fields[1]
                     server.password = fields[2]
+                    server.address = fields[3]
+                    server.url = fields[4]
                     cs_servers[i] = server
                     break
                 end
@@ -790,7 +818,15 @@ end
 
 function CloudStorage:infoServer(item)
     if item.type == "dropbox" then
-        DropBox:info(item.password)
+        if NetworkMgr:willRerunWhenOnline(function() self:infoServer(item) end) then
+            return
+        end
+        self.password = item.password
+        self.address = item.address
+        if self:generateDropBoxAccessToken() then
+            DropBox:info(self.password)
+            self.username = nil
+        end
     elseif item.type == "ftp" then
         Ftp:info(item)
     elseif item.type == "webdav" then

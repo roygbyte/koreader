@@ -4,7 +4,7 @@ local LuaData = require("luadata")
 local Migration = {}
 
 local custom_multiswipes_path = DataStorage:getSettingsDir().."/multiswipes.lua"
-local custom_multiswipes = LuaData:open(custom_multiswipes_path, { name = "MultiSwipes" })
+local custom_multiswipes = LuaData:open(custom_multiswipes_path, "MultiSwipes")
 local custom_multiswipes_table = custom_multiswipes:readSetting("multiswipes")
 
 function Migration:convertAction(location, ges, action)
@@ -188,7 +188,7 @@ function Migration:migrateGestures(caller)
             G_reader_settings:delSetting(ges_mode)
         end
     end
-    --custom multiswipes
+    -- custom multiswipes
     if custom_multiswipes_table then
         for k, v in pairs(custom_multiswipes_table) do
             local multiswipe = "multiswipe_" .. caller:safeMultiswipeName(v)

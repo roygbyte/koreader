@@ -18,7 +18,7 @@ local _ = require("gettext")
 local Screen = Device.screen
 local T = require("ffi/util").template
 
-local SpinWidget = FocusManager:new{
+local SpinWidget = FocusManager:extend{
     title_text = "",
     info_text = nil,
     width = nil,
@@ -65,20 +65,18 @@ function SpinWidget:init()
         self.width = math.floor(math.min(self.screen_width, self.screen_height) * self.width_factor)
     end
     if Device:hasKeys() then
-        self.key_events.Close = { {Device.input.group.Back}, doc = "close spin widget" }
+        self.key_events.Close = { { Device.input.group.Back } }
     end
     if Device:isTouchDevice() then
-        self.ges_events = {
-            TapClose = {
-                GestureRange:new{
-                    ges = "tap",
-                    range = Geom:new{
-                        w = self.screen_width,
-                        h = self.screen_height,
-                    }
-                },
+        self.ges_events.TapClose = {
+            GestureRange:new{
+                ges = "tap",
+                range = Geom:new{
+                    w = self.screen_width,
+                    h = self.screen_height,
+                }
             },
-         }
+        }
     end
 
     if self.unit and self.unit ~= "" then
@@ -134,12 +132,28 @@ function SpinWidget:update(numberpicker_value, numberpicker_value_index)
                 unit = "\xE2\x80\xAF" .. self.unit -- use Narrow No-Break Space (NNBSP) here
             end
         end
+        local value
+        if self.default_text then
+            value = self.default_text
+        else
+            if self.value_table then
+                value = self.value_table[self.default_value]
+            else
+                value = self.default_value
+            end
+            if self.precision then
+                value = string.format(self.precision, value)
+            end
+        end
         table.insert(buttons, {
             {
-                text = self.default_text or T(_("Default value: %1%2"),
-                    self.precision and string.format(self.precision, self.default_value) or self.default_value, unit),
+                text = T(_("Default value: %1%2"), value, unit),
                 callback = function()
-                    value_widget.value = self.default_value
+                    if value_widget.value_table then
+                        value_widget.value_index = self.default_value
+                    else
+                        value_widget.value = self.default_value
+                    end
                     value_widget:update()
                 end,
             },
@@ -274,11 +288,6 @@ function SpinWidget:onShow()
     UIManager:setDirty(self, function()
         return "ui", self.spin_frame.dimen
     end)
-    return true
-end
-
-function SpinWidget:onAnyKeyPressed()
-    self:onClose()
     return true
 end
 

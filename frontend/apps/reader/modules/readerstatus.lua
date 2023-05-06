@@ -4,28 +4,21 @@ local ButtonDialogTitle = require("ui/widget/buttondialogtitle")
 local Device = require("device")
 local Event = require("ui/event")
 local InfoMessage = require("ui/widget/infomessage")
-local InputContainer = require("ui/widget/container/inputcontainer")
 local UIManager = require("ui/uimanager")
+local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local util = require("util")
 local _ = require("gettext")
 local T = require("ffi/util").template
 
-local ReaderStatus = InputContainer:new {
+local ReaderStatus = WidgetContainer:extend{
     document = nil,
-    summary = {
-        rating = 0,
-        note = nil,
-        status = "",
-        modified = "",
-    },
     enabled = true,
-    total_pages = 0
+    total_pages = 0,
 }
 
 function ReaderStatus:init()
     if self.ui.document.is_pic then
         self.enabled = false
-        return
     else
         self.total_pages = self.document:getPageCount()
         self.ui.menu:registerToMainMenu(self)
@@ -61,7 +54,7 @@ function ReaderStatus:onEndOfBook()
         self:onMarkBook(true)
     end
 
-    if (settings == "pop-up" or settings == nil) and UIManager:getTopWidget() ~= "end_document" then
+    if (settings == "pop-up" or settings == nil) and UIManager:getNthTopWidget().name ~= "end_document" then
         local buttons = {
             {
                 {
@@ -98,7 +91,7 @@ function ReaderStatus:onEndOfBook()
                     text = _("Open next file"),
                     enabled = collate,
                     callback = function()
-                        self:openNextFile(self.document.file)
+                        self:onOpenNextDocumentInFolder()
                         UIManager:close(choose_action)
                     end,
                 },
@@ -148,7 +141,7 @@ function ReaderStatus:onEndOfBook()
             UIManager:close(info)
             -- Delay until the next tick, as this will destroy the Document instance, but we may not be the final Event caught by said Document...
             UIManager:nextTick(function()
-                self:openNextFile(self.document.file)
+                self:onOpenNextDocumentInFolder()
             end)
         else
             UIManager:show(InfoMessage:new{
@@ -190,12 +183,12 @@ function ReaderStatus:openFileBrowser()
     end
 end
 
-function ReaderStatus:openNextFile(next_file)
+function ReaderStatus:onOpenNextDocumentInFolder()
     local FileManager = require("apps/filemanager/filemanager")
     if not FileManager.instance then
         self.ui:showFileManager()
     end
-    next_file = FileManager.instance.file_chooser:getNextFile(next_file)
+    local next_file = FileManager.instance.file_chooser:getNextFile(self.document.file)
     FileManager.instance:onClose()
     if next_file then
         self.ui:switchDocument(next_file)
@@ -264,6 +257,9 @@ function ReaderStatus:onMarkBook(mark_read)
     else
         self.settings.data.summary = {status = "complete"}
     end
+    -- If History is called over Reader, it will read the file to get the book status, so save and flush
+    self.settings:saveSetting("summary", self.settings.data.summary)
+    self.settings:flush()
 end
 
 function ReaderStatus:onReadSettings(config)

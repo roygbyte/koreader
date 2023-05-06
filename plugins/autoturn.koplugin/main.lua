@@ -3,13 +3,13 @@ local Event = require("ui/event")
 local PluginShare = require("pluginshare")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
+local datetime = require("datetime")
 local logger = require("logger")
 local time = require("ui/time")
-local util = require("util")
 local _ = require("gettext")
 local T = require("ffi/util").template
 
-local AutoTurn = WidgetContainer:new{
+local AutoTurn = WidgetContainer:extend{
     name = "autoturn",
     is_doc_only = true,
     autoturn_sec = 0,
@@ -32,7 +32,7 @@ function AutoTurn:_schedule()
     local delay = self.last_action_time + time.s(self.autoturn_sec) - UIManager:getTime()
 
     if delay <= 0 then
-        if UIManager:getTopWidget() == "ReaderUI" then
+        if UIManager:getNthTopWidget().name == "ReaderUI" then
             logger.dbg("AutoTurn: go to next page")
             self.ui:handleEvent(Event:new("GotoViewRel", self.autoturn_distance))
             self.last_action_time = UIManager:getTime()
@@ -67,7 +67,7 @@ function AutoTurn:_start()
 
         local text
         if self.autoturn_distance == 1 then
-            local time_string = util.secondsToClockDuration("modern", self.autoturn_sec, false, true, true, true)
+            local time_string = datetime.secondsToClockDuration("modern", self.autoturn_sec, false, true, true, true)
             text = T(_("Autoturn is now active and will automatically turn the page every %1."), time_string)
         else
             text = T(_("Autoturn is now active and will automatically scroll %1 % of the page every %2 seconds."),
@@ -141,14 +141,14 @@ function AutoTurn:addToMainMenu(menu_items)
     menu_items.autoturn = {
         sorting_hint = "navi",
         text_func = function()
-            local time_string = util.secondsToClockDuration("modern", self.autoturn_sec, false, true, true, true)
+            local time_string = datetime.secondsToClockDuration("modern", self.autoturn_sec, false, true, true, true)
             return self:_enabled() and T(_("Autoturn: %1"), time_string) or _("Autoturn")
         end,
         checked_func = function() return self:_enabled() end,
         callback = function(menu)
             local DateTimeWidget = require("ui/widget/datetimewidget")
             local autoturn_seconds = G_reader_settings:readSetting("autoturn_timeout_seconds", 30)
-            local autoturn_minutes = math.floor(autoturn_seconds / 60)
+            local autoturn_minutes = math.floor(autoturn_seconds * (1/60))
             autoturn_seconds = autoturn_seconds % 60
             local autoturn_spin = DateTimeWidget:new {
                 title_text = _("Autoturn time"),

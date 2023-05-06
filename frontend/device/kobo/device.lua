@@ -1,7 +1,10 @@
 local Generic = require("device/generic/device")
 local Geom = require("ui/geometry")
+local UIManager -- Updated on UIManager init
 local WakeupMgr = require("device/wakeupmgr")
+local time = require("ui/time")
 local ffiUtil = require("ffi/util")
+local lfs = require("libs/libkoreader-lfs")
 local logger = require("logger")
 local util = require("util")
 local _ = require("gettext")
@@ -15,6 +18,7 @@ require("ffi/posix_h")
 
 local function yes() return true end
 local function no() return false end
+local function NOP() return end
 
 local function koboEnableWifi(toggle)
     if toggle == true then
@@ -26,6 +30,31 @@ local function koboEnableWifi(toggle)
     end
 end
 
+-- NOTE: Cheap-ass way of checking if Wi-Fi seems to be enabled...
+--       Since the crux of the issues lies in race-y module unloading, this is perfectly fine for our usage.
+local function koboIsWifiOn()
+    local needle = os.getenv("WIFI_MODULE") or "sdio_wifi_pwr"
+    local nlen = #needle
+    -- /proc/modules is usually empty, unless Wi-Fi or USB is enabled
+    -- We could alternatively check if lfs.attributes("/proc/sys/net/ipv4/conf/" .. os.getenv("INTERFACE"), "mode") == "directory"
+    -- c.f., also what Cervantes does via /sys/class/net/eth0/carrier to check if the interface is up.
+    -- That said, since we only care about whether *modules* are loaded, this does the job nicely.
+    local f = io.open("/proc/modules", "re")
+    if not f then
+        return false
+    end
+
+    local found = false
+    for haystack in f:lines() do
+        if haystack:sub(1, nlen) == needle then
+            found = true
+            break
+        end
+    end
+    f:close()
+    return found
+end
+
 -- checks if standby is available on the device
 local function checkStandby()
     logger.dbg("Kobo: checking if standby is possible ...")
@@ -34,12 +63,12 @@ local function checkStandby()
         return no
     end
     local mode = f:read()
-    logger.dbg("Kobo: available power states", mode)
-    if mode:find("standby") then
-        logger.dbg("Kobo: standby state allowed")
+    logger.dbg("Kobo: available power states:", mode)
+    if mode and mode:find("standby") then
+        logger.dbg("Kobo: standby state is supported")
         return yes
     end
-    logger.dbg("Kobo: standby state not allowed")
+    logger.dbg("Kobo: standby state is unsupported")
     return no
 end
 
@@ -52,8 +81,8 @@ local function writeToSys(val, file)
         logger.err("Cannot open file `" .. file .. "`:", ffi.string(C.strerror(ffi.errno())))
         return
     end
-    local bytes = #val + 1 -- + LF
-    local nw = C.write(fd, val .. "\n", bytes)
+    local bytes = #val
+    local nw = C.write(fd, val, bytes)
     if nw == -1 then
         logger.err("Cannot write `" .. val .. "` to file `" .. file .. "`:", ffi.string(C.strerror(ffi.errno())))
     end
@@ -62,7 +91,48 @@ local function writeToSys(val, file)
     return nw == bytes
 end
 
-local Kobo = Generic:new{
+-- Return the highest core number
+local function getCPUCount()
+    local fd = io.open("/sys/devices/system/cpu/possible", "re")
+    if fd then
+        local str = fd:read("*line")
+        fd:close()
+
+        -- Format is n-N, where n is the first core, and N the last (e.g., 0-3)
+        return tonumber(str:match("%d+$")) or 1
+    else
+        return 1
+    end
+end
+
+local function getCPUGovernor(knob)
+    local fd = io.open(knob, "re")
+    if fd then
+        local str = fd:read("*line")
+        fd:close()
+        -- If we're currently using the userspace governor, fudge that to conservative, as we won't ever standby with Wi-Fi on.
+        -- (userspace is only used on i.MX5 for DVFS shenanigans when Wi-Fi is enabled)
+        if str == "userspace" then
+            str = "conservative"
+        end
+        return str
+    else
+        return nil
+    end
+end
+
+local function getRTCName()
+    local fd = io.open("/sys/class/rtc/rtc0/name", "re")
+    if fd then
+        local str = fd:read("*line")
+        fd:close()
+        return str
+    else
+        return nil
+    end
+end
+
+local Kobo = Generic:extend{
     model = "Kobo",
     isKobo = yes,
     isTouchDevice = yes, -- all of them are
@@ -73,6 +143,7 @@ local Kobo = Generic:new{
     canReboot = yes,
     canPowerOff = yes,
     canSuspend = yes,
+    supportsScreensaver = yes,
     -- most Kobos have X/Y switched for the touch screen
     touch_switch_xy = true,
     -- most Kobos have also mirrored X coordinates
@@ -121,17 +192,28 @@ local Kobo = Generic:new{
     unexpected_wakeup_count = 0
 }
 
--- Kobo Touch:
-local KoboTrilogy = Kobo:new{
-    model = "Kobo_trilogy",
-    needsTouchScreenProbe = yes,
-    touch_switch_xy = false,
+local KoboTrilogyA = Kobo:extend{
+    model = "Kobo_trilogy_A",
+    -- Unlike its B brethren, this one doesn't do the weird translation dance when ABS_PRESSURE is 0...
+    hasKeys = yes,
+    hasMultitouch = no,
+}
+-- Kobo Touch B:
+local KoboTrilogyB = Kobo:extend{
+    model = "Kobo_trilogy_B",
+    touch_kobo_mk3_protocol = true,
+    hasKeys = yes,
+    hasMultitouch = no,
+}
+-- Kobo Touch C:
+local KoboTrilogyC = Kobo:extend{
+    model = "Kobo_trilogy_C",
     hasKeys = yes,
     hasMultitouch = no,
 }
 
 -- Kobo Mini:
-local KoboPixie = Kobo:new{
+local KoboPixie = Kobo:extend{
     model = "Kobo_pixie",
     display_dpi = 200,
     hasMultitouch = no,
@@ -140,7 +222,7 @@ local KoboPixie = Kobo:new{
 }
 
 -- Kobo Aura One:
-local KoboDaylight = Kobo:new{
+local KoboDaylight = Kobo:extend{
     model = "Kobo_daylight",
     hasFrontlight = yes,
     touch_phoenix_protocol = true,
@@ -154,8 +236,10 @@ local KoboDaylight = Kobo:new{
 }
 
 -- Kobo Aura H2O:
-local KoboDahlia = Kobo:new{
+local KoboDahlia = Kobo:extend{
     model = "Kobo_dahlia",
+    canToggleChargingLED = yes,
+    led_uses_channel_3 = true,
     hasFrontlight = yes,
     touch_phoenix_protocol = true,
     -- There's no slot 0, the first finger gets assigned slot 1, and the second slot 2.
@@ -168,7 +252,7 @@ local KoboDahlia = Kobo:new{
 }
 
 -- Kobo Aura HD:
-local KoboDragon = Kobo:new{
+local KoboDragon = Kobo:extend{
     model = "Kobo_dragon",
     hasFrontlight = yes,
     hasMultitouch = no,
@@ -176,7 +260,7 @@ local KoboDragon = Kobo:new{
 }
 
 -- Kobo Glo:
-local KoboKraken = Kobo:new{
+local KoboKraken = Kobo:extend{
     model = "Kobo_kraken",
     hasFrontlight = yes,
     hasMultitouch = no,
@@ -184,7 +268,7 @@ local KoboKraken = Kobo:new{
 }
 
 -- Kobo Aura:
-local KoboPhoenix = Kobo:new{
+local KoboPhoenix = Kobo:extend{
     model = "Kobo_phoenix",
     hasFrontlight = yes,
     touch_phoenix_protocol = true,
@@ -198,7 +282,7 @@ local KoboPhoenix = Kobo:new{
 }
 
 -- Kobo Aura H2O2:
-local KoboSnow = Kobo:new{
+local KoboSnow = Kobo:extend{
     model = "Kobo_snow",
     hasFrontlight = yes,
     touch_snow_protocol = true,
@@ -214,7 +298,7 @@ local KoboSnow = Kobo:new{
 
 -- Kobo Aura H2O2, Rev2:
 --- @fixme Check if the Clara fix actually helps here... (#4015)
-local KoboSnowRev2 = Kobo:new{
+local KoboSnowRev2 = Kobo:extend{
     model = "Kobo_snow_r2",
     isMk7 = yes,
     hasFrontlight = yes,
@@ -228,7 +312,7 @@ local KoboSnowRev2 = Kobo:new{
 }
 
 -- Kobo Aura second edition:
-local KoboStar = Kobo:new{
+local KoboStar = Kobo:extend{
     model = "Kobo_star",
     hasFrontlight = yes,
     touch_phoenix_protocol = true,
@@ -236,7 +320,7 @@ local KoboStar = Kobo:new{
 }
 
 -- Kobo Aura second edition, Rev 2:
-local KoboStarRev2 = Kobo:new{
+local KoboStarRev2 = Kobo:extend{
     model = "Kobo_star_r2",
     isMk7 = yes,
     hasFrontlight = yes,
@@ -245,7 +329,7 @@ local KoboStarRev2 = Kobo:new{
 }
 
 -- Kobo Glo HD:
-local KoboAlyssum = Kobo:new{
+local KoboAlyssum = Kobo:extend{
     model = "Kobo_alyssum",
     hasFrontlight = yes,
     touch_phoenix_protocol = true,
@@ -254,14 +338,14 @@ local KoboAlyssum = Kobo:new{
 }
 
 -- Kobo Touch 2.0:
-local KoboPika = Kobo:new{
+local KoboPika = Kobo:extend{
     model = "Kobo_pika",
     touch_phoenix_protocol = true,
     main_finger_slot = 1,
 }
 
 -- Kobo Clara HD:
-local KoboNova = Kobo:new{
+local KoboNova = Kobo:extend{
     model = "Kobo_nova",
     isMk7 = yes,
     canToggleChargingLED = yes,
@@ -287,16 +371,14 @@ local KoboNova = Kobo:new{
 --       i.e., this will affect KSM users.
 --       c.f., https://github.com/koreader/koreader/pull/4414#issuecomment-449652335
 --       There's also a CM_ROTARY_ENABLE command, but which seems to do as much nothing as the STATUS one...
-local KoboFrost = Kobo:new{
+local KoboFrost = Kobo:extend{
     model = "Kobo_frost",
     isMk7 = yes,
     canToggleChargingLED = yes,
     hasFrontlight = yes,
     hasKeys = yes,
     hasGSensor = yes,
-    canToggleGSensor = yes,
     touch_snow_protocol = true,
-    misc_ntx_gsensor_protocol = true,
     display_dpi = 300,
     hasNaturalLight = yes,
     frontlight_settings = {
@@ -312,16 +394,14 @@ local KoboFrost = Kobo:new{
 
 -- Kobo Libra:
 -- NOTE: Assume the same quirks as the Forma apply.
-local KoboStorm = Kobo:new{
+local KoboStorm = Kobo:extend{
     model = "Kobo_storm",
     isMk7 = yes,
     canToggleChargingLED = yes,
     hasFrontlight = yes,
     hasKeys = yes,
     hasGSensor = yes,
-    canToggleGSensor = yes,
     touch_snow_protocol = true,
-    misc_ntx_gsensor_protocol = true,
     display_dpi = 300,
     hasNaturalLight = yes,
     frontlight_settings = {
@@ -343,26 +423,26 @@ local KoboStorm = Kobo:new{
 
 -- Kobo Nia:
 --- @fixme: Mostly untested, assume it's Clara-ish for now.
-local KoboLuna = Kobo:new{
+local KoboLuna = Kobo:extend{
     model = "Kobo_luna",
     isMk7 = yes,
     canToggleChargingLED = yes,
     hasFrontlight = yes,
     touch_phoenix_protocol = true,
     display_dpi = 212,
+    hasReliableMxcWaitFor = no, -- Board is similar to the Libra 2, but it's such an unpopular device that reports are scarce.
 }
 
 -- Kobo Elipsa
-local KoboEuropa = Kobo:new{
+local KoboEuropa = Kobo:extend{
     model = "Kobo_europa",
     isSunxi = yes,
     hasEclipseWfm = yes,
     canToggleChargingLED = yes,
+    led_uses_channel_3 = true,
     hasFrontlight = yes,
     hasGSensor = yes,
-    canToggleGSensor = yes,
     pressure_event = C.ABS_MT_PRESSURE,
-    misc_ntx_gsensor_protocol = true,
     display_dpi = 227,
     boot_rota = C.FB_ROTATE_CCW,
     battery_sysfs = "/sys/class/power_supply/battery",
@@ -372,17 +452,16 @@ local KoboEuropa = Kobo:new{
 }
 
 -- Kobo Sage
-local KoboCadmus = Kobo:new{
+local KoboCadmus = Kobo:extend{
     model = "Kobo_cadmus",
     isSunxi = yes,
     hasEclipseWfm = yes,
     canToggleChargingLED = yes,
+    led_uses_channel_3 = true,
     hasFrontlight = yes,
     hasKeys = yes,
     hasGSensor = yes,
-    canToggleGSensor = yes,
     pressure_event = C.ABS_MT_PRESSURE,
-    misc_ntx_gsensor_protocol = true,
     display_dpi = 300,
     hasNaturalLight = yes,
     frontlight_settings = {
@@ -401,10 +480,11 @@ local KoboCadmus = Kobo:new{
     ntx_dev = "/dev/input/by-path/platform-ntx_event0-event",
     touch_dev = "/dev/input/by-path/platform-0-0010-event",
     isSMP = yes,
+    automagic_sysfs = true,
 }
 
 -- Kobo Libra 2:
-local KoboIo = Kobo:new{
+local KoboIo = Kobo:extend{
     model = "Kobo_io",
     isMk7 = yes,
     hasEclipseWfm = yes,
@@ -412,10 +492,8 @@ local KoboIo = Kobo:new{
     hasFrontlight = yes,
     hasKeys = yes,
     hasGSensor = yes,
-    canToggleGSensor = yes,
     pressure_event = C.ABS_MT_PRESSURE,
     touch_mirrored_x = false,
-    misc_ntx_gsensor_protocol = true,
     display_dpi = 300,
     hasNaturalLight = yes,
     frontlight_settings = {
@@ -435,6 +513,30 @@ local KoboIo = Kobo:new{
     automagic_sysfs = true,
 }
 
+-- Kobo Clara 2E:
+local KoboGoldfinch = Kobo:extend{
+    model = "Kobo_goldfinch",
+    isMk7 = yes,
+    hasEclipseWfm = yes,
+    canToggleChargingLED = yes,
+    led_uses_channel_3 = true,
+    hasFrontlight = yes,
+    display_dpi = 300,
+    hasNaturalLight = yes,
+    frontlight_settings = {
+        frontlight_white = "/sys/class/backlight/mxc_msp430.0/brightness",
+        frontlight_mixer = "/sys/class/leds/aw99703-bl_FL1/color",
+        nl_min = 0,
+        nl_max = 10,
+        nl_inverted = true,
+    },
+    battery_sysfs = "/sys/class/power_supply/battery",
+    power_dev = "/dev/input/by-path/platform-bd71828-pwrkey-event",
+    -- Board is eerily similar to the Libra 2, which, unfortunately, means it's also buggy as hell...
+    -- c.f., https://github.com/koreader/koreader/issues/9552#issuecomment-1293000313
+    hasReliableMxcWaitFor = no,
+}
+
 function Kobo:setupChargingLED()
     if G_reader_settings:nilOrTrue("enable_charging_led") then
         if self:hasAuxBattery() and self.powerd:isAuxBatteryConnected() then
@@ -448,7 +550,6 @@ end
 function Kobo:getKeyRepeat()
     -- Sanity check (mostly for the testsuite's benefit...)
     if not self.ntx_fd then
-        self.hasKeyRepeat = false
         return false
     end
 
@@ -456,20 +557,14 @@ function Kobo:getKeyRepeat()
     if C.ioctl(self.ntx_fd, C.EVIOCGREP, self.key_repeat) < 0 then
         local err = ffi.errno()
         logger.warn("Device:getKeyRepeat: EVIOCGREP ioctl failed:", ffi.string(C.strerror(err)))
-        self.hasKeyRepeat = false
+        return false
     else
-        self.hasKeyRepeat = true
         logger.dbg("Key repeat is set up to repeat every", self.key_repeat[C.REP_PERIOD], "ms after a delay of", self.key_repeat[C.REP_DELAY], "ms")
+        return true
     end
-
-    return self.hasKeyRepeat
 end
 
 function Kobo:disableKeyRepeat()
-    if not self.hasKeyRepeat then
-        return
-    end
-
     -- NOTE: LuaJIT zero inits, and PERIOD == 0 with DELAY == 0 disables repeats ;).
     local key_repeat = ffi.new("unsigned int[?]", C.REP_CNT)
     if C.ioctl(self.ntx_fd, C.EVIOCSREP, key_repeat) < 0 then
@@ -479,10 +574,6 @@ function Kobo:disableKeyRepeat()
 end
 
 function Kobo:restoreKeyRepeat()
-    if not self.hasKeyRepeat then
-        return
-    end
-
     if C.ioctl(self.ntx_fd, C.EVIOCSREP, self.key_repeat) < 0 then
         local err = ffi.errno()
         logger.warn("Device:restoreKeyRepeat: EVIOCSREP ioctl failed:", ffi.string(C.strerror(err)))
@@ -526,55 +617,99 @@ function Kobo:init()
     -- Automagic sysfs discovery
     if self.automagic_sysfs then
         -- Battery
-        if util.pathExists("/sys/class/power_supply/battery") then
-            -- Newer devices (circa sunxi)
-            self.battery_sysfs = "/sys/class/power_supply/battery"
-        else
-            self.battery_sysfs = "/sys/class/power_supply/mc13892_bat"
+        if not self.battery_sysfs then
+            if util.pathExists("/sys/class/power_supply/battery") then
+                -- Newer devices (circa sunxi)
+                self.battery_sysfs = "/sys/class/power_supply/battery"
+            else
+                self.battery_sysfs = "/sys/class/power_supply/mc13892_bat"
+            end
         end
 
         -- Frontlight
         if self:hasNaturalLight() then
-            if util.fileExists("/sys/class/leds/aw99703-bl_FL1/color") then
-                -- HWConfig FL_PWM is AW99703x2
-                self.frontlight_settings.frontlight_mixer = "/sys/class/leds/aw99703-bl_FL1/color"
-            elseif util.fileExists("/sys/class/backlight/lm3630a_led/color") then
-                -- HWConfig FL_PWM is LM3630
-                self.frontlight_settings.frontlight_mixer = "/sys/class/backlight/lm3630a_led/color"
-            elseif util.fileExists("/sys/class/backlight/tlc5947_bl/color") then
-                -- HWConfig FL_PWM is TLC5947
-                self.frontlight_settings.frontlight_mixer = "/sys/class/backlight/tlc5947_bl/color"
+            if not self.frontlight_settings.frontlight_mixer then
+                if util.fileExists("/sys/class/leds/aw99703-bl_FL1/color") then
+                    -- HWConfig FL_PWM is AW99703x2
+                    self.frontlight_settings.frontlight_mixer = "/sys/class/leds/aw99703-bl_FL1/color"
+                elseif util.fileExists("/sys/class/backlight/lm3630a_led/color") then
+                    -- HWConfig FL_PWM is LM3630
+                    self.frontlight_settings.frontlight_mixer = "/sys/class/backlight/lm3630a_led/color"
+                elseif util.fileExists("/sys/class/backlight/tlc5947_bl/color") then
+                    -- HWConfig FL_PWM is TLC5947
+                    self.frontlight_settings.frontlight_mixer = "/sys/class/backlight/tlc5947_bl/color"
+                end
             end
         end
 
-        -- Input
-        if util.fileExists("/dev/input/by-path/platform-1-0010-event") then
-            -- Elan (HWConfig TouchCtrl is ekth6) on i2c bus 1
-            self.touch_dev = "/dev/input/by-path/platform-1-0010-event"
-        elseif util.fileExists("/dev/input/by-path/platform-0-0010-event") then
-            -- Elan (HWConfig TouchCtrl is ekth6) on i2c bus 0
-            self.touch_dev = "/dev/input/by-path/platform-0-0010-event"
-        else
-            self.touch_dev = "/dev/input/event1"
+        -- Touch panel input
+        if not self.touch_dev then
+            if util.fileExists("/dev/input/by-path/platform-1-0010-event") then
+                -- Elan (HWConfig TouchCtrl is ekth6) on i2c bus 1
+                self.touch_dev = "/dev/input/by-path/platform-1-0010-event"
+            elseif util.fileExists("/dev/input/by-path/platform-0-0010-event") then
+                -- Elan (HWConfig TouchCtrl is ekth6) on i2c bus 0
+                self.touch_dev = "/dev/input/by-path/platform-0-0010-event"
+            else
+                self.touch_dev = "/dev/input/event1"
+            end
         end
 
-        if util.fileExists("/dev/input/by-path/platform-gpio-keys-event") then
-            -- Libra 2 w/ a BD71828 PMIC
-            self.ntx_dev = "/dev/input/by-path/platform-gpio-keys-event"
-        elseif util.fileExists("/dev/input/by-path/platform-ntx_event0-event") then
-            -- sunxi & Mk. 7
-            self.ntx_dev = "/dev/input/by-path/platform-ntx_event0-event"
-        elseif util.fileExists("/dev/input/by-path/platform-mxckpd-event") then
-            -- circa Mk. 5 i.MX
-            self.ntx_dev = "/dev/input/by-path/platform-mxckpd-event"
-        else
-            self.ntx_dev = "/dev/input/event0"
+        -- Physical buttons & synthetic NTX events
+        if not self.ntx_dev then
+            if util.fileExists("/dev/input/by-path/platform-gpio-keys-event") then
+                -- Libra 2 w/ a BD71828 PMIC
+                self.ntx_dev = "/dev/input/by-path/platform-gpio-keys-event"
+            elseif util.fileExists("/dev/input/by-path/platform-ntx_event0-event") then
+                -- sunxi & Mk. 7
+                self.ntx_dev = "/dev/input/by-path/platform-ntx_event0-event"
+            elseif util.fileExists("/dev/input/by-path/platform-mxckpd-event") then
+                -- circa Mk. 5 i.MX
+                self.ntx_dev = "/dev/input/by-path/platform-mxckpd-event"
+            else
+                self.ntx_dev = "/dev/input/event0"
+            end
         end
 
-        if util.fileExists("/dev/input/by-path/platform-bd71828-pwrkey-event") then
-            -- Libra 2 w/ a BD71828 PMIC
-            self.power_dev = "/dev/input/by-path/platform-bd71828-pwrkey-event"
+        -- Power button (this usually ends up in ntx_dev, except with some PMICs)
+        if not self.power_dev then
+            if util.fileExists("/dev/input/by-path/platform-bd71828-pwrkey-event") then
+                -- Libra 2 w/ a BD71828 PMIC
+                self.power_dev = "/dev/input/by-path/platform-bd71828-pwrkey-event"
+            elseif util.fileExists("/dev/input/by-path/platform-bd71828-pwrkey.4.auto-event") then
+                -- Sage w/ a BD71828 PMIC
+                self.power_dev = "/dev/input/by-path/platform-bd71828-pwrkey.4.auto-event"
+            end
         end
+    end
+
+    -- NOTE: i.MX5 devices have a wonky RTC that doesn't like alarms set further away that UINT16_MAX seconds from now...
+    --       (c.f., WakeupMgr for more details).
+    -- NOTE: getRTCName is currently hardcoded to rtc0 (which is also WakeupMgr's default).
+    local dodgy_rtc = false
+    if getRTCName() == "pmic_rtc" then
+        -- This *should* match the 'RTC' (46) NTX HWConfig field being set to 'MSP430' (0).
+        dodgy_rtc = true
+    end
+
+    -- Detect the various CPU governor sysfs knobs...
+    if util.pathExists("/sys/devices/system/cpu/cpufreq/policy0") then
+        self.cpu_governor_knob = "/sys/devices/system/cpu/cpufreq/policy0/scaling_governor"
+    else
+        self.cpu_governor_knob = "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"
+    end
+    self.default_cpu_governor = getCPUGovernor(self.cpu_governor_knob)
+    -- NOP unsupported methods
+    if not self.default_cpu_governor then
+        self.performanceCPUGovernor = NOP
+        self.defaultCPUGovernor = NOP
+    end
+
+    -- And while we're on CPU-related endeavors...
+    self.cpu_count = self:isSMP() and getCPUCount() or 1
+    -- NOP unsupported methods
+    if self.cpu_count == 1 then
+        self.enableCPUCores = NOP
     end
 
     -- Automagically set this so we never have to remember to do it manually ;p
@@ -622,8 +757,11 @@ function Kobo:init()
         main_finger_slot = self.main_finger_slot or 0,
         pressure_event = self.pressure_event,
     }
-    self.wakeup_mgr = WakeupMgr:new()
+    self.wakeup_mgr = WakeupMgr:new{
+        dodgy_rtc = dodgy_rtc,
+    }
 
+    -- Let generic properly setup the standard stuff
     Generic.init(self)
 
     -- Various HW Buttons, Switches & Synthetic NTX events
@@ -642,30 +780,32 @@ function Kobo:init()
     -- NOTE: usb hotplug event is also available in /tmp/nickel-hardware-status (... but only when Nickel is running ;p)
     self.input.open("fake_events")
 
-    if not self.needsTouchScreenProbe() then
-        self:initEventAdjustHooks()
-    else
-        -- if touch probe is required, we postpone EventAdjustHook
-        -- initialization to when self:touchScreenProbe is called
-        self.touchScreenProbe = function()
-            -- if user has not set KOBO_TOUCH_MIRRORED yet
-            if KOBO_TOUCH_MIRRORED == nil then
-                -- and has no probe before
-                if G_reader_settings:hasNot("kobo_touch_switch_xy") then
-                    local TouchProbe = require("tools/kobo_touch_probe")
-                    local UIManager = require("ui/uimanager")
-                    UIManager:show(TouchProbe:new{})
-                    UIManager:run()
-                    -- assuming TouchProbe sets kobo_touch_switch_xy config
-                end
-                self.touch_switch_xy = G_reader_settings:readSetting("kobo_touch_switch_xy")
-            end
-            self:initEventAdjustHooks()
-        end
-    end
+    -- Input handling on Kobo is a thing of nightmares, start by setting up the actual evdev handler...
+    self:setTouchEventHandler()
+    -- And then handle the extra shenanigans if necessary.
+    self:initEventAdjustHooks()
 
     -- See if the device supports key repeat
-    self:getKeyRepeat()
+    if not self:getKeyRepeat() then
+        -- NOP unsupported methods
+        self.disableKeyRepeat = NOP
+        self.restoreKeyRepeat = NOP
+    end
+
+    -- Detect the NTX charging LED sysfs knob
+    if util.pathExists("/sys/devices/platform/ntx_led/lit") then
+        self.ntx_lit_sysfs_knob = "/sys/devices/platform/ntx_led/lit"
+    elseif util.pathExists("/sys/devices/platform/pmic_light.1/lit") then
+        self.ntx_lit_sysfs_knob = "/sys/devices/platform/pmic_light.1/lit"
+    else
+        self.canToggleChargingLED = no
+    end
+
+    -- NOP unsupported methods
+    if not self:canToggleChargingLED() then
+        self.toggleChargingLED = NOP
+        self.setupChargingLED = NOP
+    end
 
     -- We have no way of querying the current state of the charging LED, so, start from scratch.
     -- Much like Nickel, start by turning it off.
@@ -682,7 +822,11 @@ function Kobo:init()
 
     -- Check if the device has a Neonode IR grid (to tone down the chatter on resume ;)).
     if lfs.attributes("/sys/devices/virtual/input/input1/neocmd", "mode") == "file" then
-        self.hasIRGrid = true
+        -- As found on (at least), the Aura H2O
+        self.hasIRGridSysfsKnob = "/sys/devices/virtual/input/input1/neocmd"
+    elseif lfs.attributes("/sys/devices/platform/imx-i2c.1/i2c-1/1-0050/neocmd", "mode") == "file" then
+        -- As found on (at least) the Glo HD (c.f., https://github.com/koreader/koreader/pull/9377#issuecomment-1213544478)
+        self.hasIRGridSysfsKnob = "/sys/devices/platform/imx-i2c.1/i2c-1/1-0050/neocmd"
     end
 end
 
@@ -738,69 +882,89 @@ function Kobo:initNetworkManager(NetworkMgr)
         os.execute("./restore-wifi-async.sh")
     end
 
-    -- NOTE: Cheap-ass way of checking if Wi-Fi seems to be enabled...
-    --       Since the crux of the issues lies in race-y module unloading, this is perfectly fine for our usage.
-    function NetworkMgr:isWifiOn()
-        local needle = os.getenv("WIFI_MODULE") or "sdio_wifi_pwr"
-        local nlen = #needle
-        -- /proc/modules is usually empty, unless Wi-Fi or USB is enabled
-        -- We could alternatively check if lfs.attributes("/proc/sys/net/ipv4/conf/" .. os.getenv("INTERFACE"), "mode") == "directory"
-        -- c.f., also what Cervantes does via /sys/class/net/eth0/carrier to check if the interface is up.
-        -- That said, since we only care about whether *modules* are loaded, this does the job nicely.
-        local f = io.open("/proc/modules", "re")
-        if not f then
-            return false
-        end
+    NetworkMgr.isWifiOn = koboIsWifiOn
+end
 
-        local found = false
-        for haystack in f:lines() do
-            if haystack:sub(1, nlen) == needle then
-                found = true
-                break
+function Kobo:setTouchEventHandler()
+    if self.touch_snow_protocol then
+        self.input.snow_protocol = true
+    elseif self.touch_phoenix_protocol then
+        self.input.handleTouchEv = self.input.handleTouchEvPhoenix
+    elseif not self:hasMultitouch() then
+        self.input.handleTouchEv = self.input.handleTouchEvLegacy
+        if self.touch_kobo_mk3_protocol then
+            self.input.touch_kobo_mk3_protocol = true
+        end
+    end
+
+    -- Accelerometer
+    if self:hasGSensor() then
+        self.input.handleMiscEv = function(this, ev)
+            -- As generated by gyroTranslation below
+            if ev.code == C.MSC_GYRO then
+                return this:handleGyroEv(ev)
             end
         end
-        f:close()
-        return found
     end
 end
 
-function Kobo:supportsScreensaver() return true end
+-- HAL for gyro orientation switches (NTX's EV_MSC:MSC_RAW w/ custom values to EV_MSC:MSC_GYRO w/ our own custom values)
+local function gyroTranslation(ev)
+    -- c.f., include/uapi/linux/input.h,
+    -- implementations in drivers/hwmon/mma8x5x.c & drivers/input/touchscreen/kx122.c
+    local MSC_RAW_GSENSOR_PORTRAIT_DOWN   = 0x17
+    local MSC_RAW_GSENSOR_PORTRAIT_UP     = 0x18
+    local MSC_RAW_GSENSOR_LANDSCAPE_RIGHT = 0x19
+    local MSC_RAW_GSENSOR_LANDSCAPE_LEFT  = 0x1a
+    -- Not that we care about those, but they are reported, and accurate ;).
+    --[[
+    local MSC_RAW_GSENSOR_BACK            = 0x1b
+    local MSC_RAW_GSENSOR_FRONT           = 0x1c
+    --]]
+
+    if ev.value == MSC_RAW_GSENSOR_PORTRAIT_UP then
+        -- i.e., UR
+        ev.code = C.MSC_GYRO
+        ev.value = C.DEVICE_ROTATED_UPRIGHT
+    elseif ev.value == MSC_RAW_GSENSOR_LANDSCAPE_RIGHT then
+        -- i.e., CW
+        ev.code = C.MSC_GYRO
+        ev.value = C.DEVICE_ROTATED_CLOCKWISE
+    elseif ev.value == MSC_RAW_GSENSOR_PORTRAIT_DOWN then
+        -- i.e., UD
+        ev.code = C.MSC_GYRO
+        ev.value = C.DEVICE_ROTATED_UPSIDE_DOWN
+    elseif ev.value == MSC_RAW_GSENSOR_LANDSCAPE_LEFT then
+        -- i.e., CCW
+        ev.code = C.MSC_GYRO
+        ev.value = C.DEVICE_ROTATED_COUNTER_CLOCKWISE
+    end
+end
 
 function Kobo:initEventAdjustHooks()
-    -- it's called KOBO_TOUCH_MIRRORED in defaults.lua, but what it
-    -- actually did in its original implementation was to switch X/Y.
-    -- NOTE: for kobo touch, adjustTouchSwitchXY needs to be called before
-    -- adjustTouchMirrorX
-    if (self.touch_switch_xy and not KOBO_TOUCH_MIRRORED)
-            or (not self.touch_switch_xy and KOBO_TOUCH_MIRRORED)
-    then
-        self.input:registerEventAdjustHook(self.input.adjustTouchSwitchXY)
-    end
-
-    if self.touch_mirrored_x then
-        self.input:registerEventAdjustHook(
-            self.input.adjustTouchMirrorX,
-            --- @fixme what if we change the screen portrait mode?
-            self.screen:getWidth()
-        )
-    end
-
-    if self.touch_snow_protocol then
-        self.input.snow_protocol = true
-    end
-
-    if self.touch_phoenix_protocol then
-        self.input.handleTouchEv = self.input.handleTouchEvPhoenix
-    end
-
-    -- Accelerometer on the Forma
-    if self.misc_ntx_gsensor_protocol then
-        if G_reader_settings:isTrue("input_ignore_gsensor") then
-            self.input.isNTXAccelHooked = false
-        else
-            self.input.handleMiscEv = self.input.handleMiscEvNTX
-            self.input.isNTXAccelHooked = true
+    -- Build a single composite hook, to avoid duplicated branches...
+    local koboInputMangling
+    -- NOTE: touch_switch_xy is *always* true, but not touch_mirrored_x...
+    if self.touch_switch_xy and self.touch_mirrored_x then
+        local max_x = self.screen:getWidth() - 1
+        koboInputMangling = function(this, ev)
+            if ev.type == C.EV_ABS then
+                this:adjustABS_SwitchAxesAndMirrorX(ev, max_x)
+            elseif ev.type == C.EV_MSC and ev.code == C.MSC_RAW then
+                gyroTranslation(ev)
+            end
         end
+    elseif self.touch_switch_xy and not self.touch_mirrored_x then
+        koboInputMangling = function(this, ev)
+            if ev.type == C.EV_ABS then
+                this:adjustABS_SwitchXY(ev)
+            elseif ev.type == C.EV_MSC and ev.code == C.MSC_RAW then
+                gyroTranslation(ev)
+            end
+        end
+    end
+    if koboInputMangling then
+        self.input:registerEventAdjustHook(koboInputMangling)
     end
 end
 
@@ -810,8 +974,10 @@ local function getCodeName()
     -- If that fails, run the script ourselves
     if not codename then
         local std_out = io.popen("/bin/kobo_config.sh 2>/dev/null", "re")
-        codename = std_out:read("*line")
-        std_out:close()
+        if std_out then
+            codename = std_out:read("*line")
+            std_out:close()
+        end
     end
     return codename
 end
@@ -820,16 +986,18 @@ function Kobo:getFirmwareVersion()
     local version_file = io.open("/mnt/onboard/.kobo/version", "re")
     if not version_file then
         self.firmware_rev = "none"
+        return
     end
     local version_str = version_file:read("*line")
     version_file:close()
 
-    local i = 0
-    for field in ffiUtil.gsplit(version_str, ",", false, false) do
-        i = i + 1
-        if (i == 3) then
-             self.firmware_rev = field
+    local i = 1
+    for field in version_str:gmatch("([^,]+)") do
+        if i == 3 then
+            self.firmware_rev = field
+            break
         end
+        i = i + 1
     end
 end
 
@@ -851,8 +1019,14 @@ local function getProductId()
     return product_id
 end
 
+-- NOTE: We overload this to make sure checkUnexpectedWakeup doesn't trip *before* the newly scheduled suspend
+function Kobo:rescheduleSuspend()
+    UIManager:unschedule(self.suspend)
+    UIManager:unschedule(self.checkUnexpectedWakeup)
+    UIManager:scheduleIn(self.suspend_wait_timeout, self.suspend, self)
+end
+
 function Kobo:checkUnexpectedWakeup()
-    local UIManager = require("ui/uimanager")
     -- Just in case another event like SleepCoverClosed also scheduled a suspend
     UIManager:unschedule(self.suspend)
 
@@ -868,10 +1042,8 @@ function Kobo:checkUnexpectedWakeup()
     else
         -- We've hit an early resume, assume this is unexpected (as we only run if Kobo:resume hasn't already).
         logger.dbg("Kobo suspend: checking unexpected wakeup number", self.unexpected_wakeup_count)
-        if self.unexpected_wakeup_count == 0 or self.unexpected_wakeup_count > 20 then
-            -- Don't put device back to sleep under the following two cases:
-            --   1. a resume event triggered Kobo:resume() function
-            --   2. trying to put device back to sleep more than 20 times after unexpected wakeup
+        if self.unexpected_wakeup_count > 20 then
+            -- If we've failed to put the device back to sleep over 20 consecutive times, we give up.
             -- Broadcast a specific event, so that AutoSuspend can pick up the baton...
             local Event = require("ui/event")
             UIManager:broadcastEvent(Event:new("UnexpectedWakeupLimit"))
@@ -883,11 +1055,23 @@ function Kobo:checkUnexpectedWakeup()
     end
 end
 
-function Kobo:getUnexpectedWakeup() return self.unexpected_wakeup_count end
-
 --- The function to put the device into standby, with enabled touchscreen.
 -- max_duration ... maximum time for the next standby, can wake earlier (e.g. Tap, Button ...)
 function Kobo:standby(max_duration)
+    -- NOTE: Switch to the performance CPU governor, in order to speed up the resume process so as to lower its latency cost...
+    --       (It won't have any impact on power efficiency *during* suspend, so there's not really any drawback).
+    self:performanceCPUGovernor()
+
+    --[[
+    -- On most devices, attempting to PM with a Wi-Fi module loaded will horribly crash the kernel, so, don't?
+    -- NOTE: Much like suspend, our caller should ensure this never happens, hence this being commented out ;).
+    if koboIsWifiOn() then
+        -- AutoSuspend relies on NetworkMgr:getWifiState to prevent this, so, if we ever trip this, it's a bug ;).
+        logger.err("Kobo standby: cannot standby with Wi-Fi modules loaded! (NetworkMgr is confused: this is a bug)")
+        return
+    end
+    --]]
+
     -- We don't really have anything to schedule, we just need an alarm out of WakeupMgr ;).
     local function standby_alarm()
     end
@@ -896,8 +1080,7 @@ function Kobo:standby(max_duration)
         self.wakeup_mgr:addTask(max_duration, standby_alarm)
     end
 
-    local time = require("ui/time")
-    logger.info("Kobo standby: asking to enter standby . . .")
+    logger.dbg("Kobo standby: asking to enter standby . . .")
     local standby_time = time.boottime_or_realtime_coarse()
 
     local ret = writeToSys("standby", "/sys/power/state")
@@ -906,9 +1089,17 @@ function Kobo:standby(max_duration)
     self.total_standby_time = self.total_standby_time + self.last_standby_time
 
     if ret then
-        logger.info("Kobo standby: zZz zZz zZz zZz... And woke up!")
+        logger.dbg("Kobo standby: zZz zZz zZz zZz... And woke up!")
+        if G_reader_settings:isTrue("pm_debug_entry_failure") then
+            -- NOTE: This is a debug option where we coopt the charging LED, hence us not using setupChargingLED here.
+            --       (It's called on resume anyway).
+            self:toggleChargingLED(false)
+        end
     else
         logger.warn("Kobo standby: the kernel refused to enter standby!")
+        if G_reader_settings:isTrue("pm_debug_entry_failure") then
+            self:toggleChargingLED(true)
+        end
     end
 
     if max_duration then
@@ -926,11 +1117,13 @@ function Kobo:standby(max_duration)
         --]]
         self.wakeup_mgr:removeTasks(nil, standby_alarm)
     end
+
+    -- And restore the standard CPU scheduler once we're done dealing with the wakeup event.
+    UIManager:tickAfterNext(self.defaultCPUGovernor, self)
 end
 
 function Kobo:suspend()
     logger.info("Kobo suspend: going to sleep . . .")
-    local UIManager = require("ui/uimanager")
     UIManager:unschedule(self.checkUnexpectedWakeup)
     -- NOTE: Sleep as little as possible here, sleeping has a tendency to make
     -- everything mysteriously hang...
@@ -959,7 +1152,7 @@ function Kobo:suspend()
     local curr_wakeup_count
     if has_wakeup_count then
         curr_wakeup_count = "$(cat /sys/power/wakeup_count)"
-        logger.info("Kobo suspend: Current WakeUp count:", curr_wakeup_count)
+        logger.dbg("Kobo suspend: Current WakeUp count:", curr_wakeup_count)
     end
     -]]
 
@@ -968,16 +1161,16 @@ function Kobo:suspend()
     --       c.f., state_extended_store @ kernel/power/main.c
     local ret = writeToSys("1", "/sys/power/state-extended")
     if ret then
-        logger.info("Kobo suspend: successfully asked the kernel to put subsystems to sleep")
+        logger.dbg("Kobo suspend: successfully asked the kernel to put subsystems to sleep")
     else
         logger.warn("Kobo suspend: the kernel refused to flag subsystems for suspend!")
     end
 
     ffiUtil.sleep(2)
-    logger.info("Kobo suspend: waited for 2s because of reasons...")
+    logger.dbg("Kobo suspend: waited for 2s because of reasons...")
 
     os.execute("sync")
-    logger.info("Kobo suspend: synced FS")
+    logger.dbg("Kobo suspend: synced FS")
 
     --[[
     if has_wakeup_count then
@@ -987,7 +1180,7 @@ function Kobo:suspend()
             return false
         end
         re, err_msg, err_code = f:write(tostring(curr_wakeup_count), "\n")
-        logger.info("Kobo suspend: wrote WakeUp count:", curr_wakeup_count)
+        logger.dbg("Kobo suspend: wrote WakeUp count:", curr_wakeup_count)
         if not re then
             logger.err("Kobo suspend: failed to write WakeUp count:",
                        err_msg,
@@ -997,8 +1190,7 @@ function Kobo:suspend()
     end
     --]]
 
-    local time = require("ui/time")
-    logger.info("Kobo suspend: asking for a suspend to RAM . . .")
+    logger.dbg("Kobo suspend: asking for a suspend to RAM . . .")
     local suspend_time = time.boottime_or_realtime_coarse()
 
     ret = writeToSys("mem", "/sys/power/state")
@@ -1010,10 +1202,16 @@ function Kobo:suspend()
 
     if ret then
         logger.info("Kobo suspend: ZzZ ZzZ ZzZ... And woke up!")
+        if G_reader_settings:isTrue("pm_debug_entry_failure") then
+            self:toggleChargingLED(false)
+        end
     else
         logger.warn("Kobo suspend: the kernel refused to enter suspend!")
         -- Reset state-extended back to 0 since we are giving up.
         writeToSys("0", "/sys/power/state-extended")
+        if G_reader_settings:isTrue("pm_debug_entry_failure") then
+            self:toggleChargingLED(true)
+        end
     end
 
     -- NOTE: Ideally, we'd need a way to warn the user that suspending
@@ -1025,10 +1223,12 @@ function Kobo:suspend()
     --       to wakeup & sleep ad nauseam,
     --       which is where the non-sensical 1 -> mem -> 0 loop idea comes from...
     --       cf. nickel_suspend_strace.txt for more details.
+    -- NOTE: On recent enough kernels, with debugfs enabled and mounted, see also
+    --       /sys/kernel/debug/suspend_stats & /sys/kernel/debug/wakeup_sources
 
     --[[
     if has_wakeup_count then
-        logger.info("wakeup count: $(cat /sys/power/wakeup_count)")
+        logger.dbg("wakeup count: $(cat /sys/power/wakeup_count)")
     end
 
     -- Print tke kernel log since our attempt to sleep...
@@ -1038,20 +1238,17 @@ function Kobo:suspend()
     -- NOTE: We unflag /sys/power/state-extended in Kobo:resume() to keep
     --       things tidy and easier to follow
 
-    -- Kobo:resume() will reset unexpected_wakeup_count = 0 to signal an
-    -- expected wakeup, which gets checked in checkUnexpectedWakeup().
+    -- Kobo:resume() will reset unexpected_wakeup_count and unschedule the check to signal a sane wakeup.
     self.unexpected_wakeup_count = self.unexpected_wakeup_count + 1
-    -- We're assuming Kobo:resume() will be called in the next 15 seconds in ordrer to cancel that check.
     logger.dbg("Kobo suspend: scheduling unexpected wakeup guard")
     UIManager:scheduleIn(15, self.checkUnexpectedWakeup, self)
 end
 
 function Kobo:resume()
-    logger.info("Kobo resume: clean up after wakeup")
+    logger.dbg("Kobo resume: clean up after wakeup")
     -- Reset unexpected_wakeup_count ASAP
     self.unexpected_wakeup_count = 0
     -- Unschedule the checkUnexpectedWakeup shenanigans.
-    local UIManager = require("ui/uimanager")
     UIManager:unschedule(self.checkUnexpectedWakeup)
     UIManager:unschedule(self.suspend)
 
@@ -1062,7 +1259,7 @@ function Kobo:resume()
     --       Among other things, this sets up the wakeup pins (e.g., resume on input).
     local ret = writeToSys("0", "/sys/power/state-extended")
     if ret then
-        logger.info("Kobo resume: successfully asked the kernel to resume subsystems")
+        logger.dbg("Kobo resume: successfully asked the kernel to resume subsystems")
     else
         logger.warn("Kobo resume: the kernel refused to flag subsystems for resume!")
     end
@@ -1070,10 +1267,13 @@ function Kobo:resume()
     -- HACK: wait a bit (0.1 sec) for the kernel to catch up
     ffiUtil.usleep(100000)
 
-    if self.hasIRGrid then
+    if self.hasIRGridSysfsKnob then
         -- cf. #1862, I can reliably break IR touch input on resume...
         -- cf. also #1943 for the rationale behind applying this workaround in every case...
-        writeToSys("a", "/sys/devices/virtual/input/input1/neocmd")
+        -- c.f., neo_ctl @ drivers/input/touchscreen/zforce_i2c.c,
+        -- basically, a is wakeup (for activate), d is sleep (for deactivate), and we don't care about s (set res),
+        -- and l (led signal level, actually a NOP on NTX kernels).
+        writeToSys("a", self.hasIRGridSysfsKnob)
     end
 
     -- A full suspend may have toggled the LED off.
@@ -1081,8 +1281,11 @@ function Kobo:resume()
 end
 
 function Kobo:usbPlugOut()
-    -- Reset the unexpected wakeup shenanigans, since we're no longer charging, meaning power savings are now critical again ;).
-    self.unexpected_wakeup_count = 0
+    -- Rewind the unexpected wakeup counter, since we're no longer charging, meaning power savings are now critical again ;).
+    -- NOTE: We don't reset it to 0 because, semantically, only resume should ever be allowed to do so.
+    if self.unexpected_wakeup_count > 0 then
+        self.unexpected_wakeup_count = 1
+    end
 end
 
 function Kobo:saveSettings()
@@ -1095,30 +1298,29 @@ function Kobo:powerOff()
     self.wakeup_mgr:unsetWakeupAlarm()
 
     -- Then shut down without init's help
-    os.execute("poweroff -f")
+    os.execute("sleep 1 && poweroff -f &")
 end
 
 function Kobo:reboot()
-    os.execute("reboot")
-end
-
-function Kobo:toggleGSensor(toggle)
-    if self:canToggleGSensor() and self.input then
-        if self.misc_ntx_gsensor_protocol then
-            self.input:toggleMiscEvNTX(toggle)
-        end
-    end
+    os.execute("sleep 1 && reboot &")
 end
 
 function Kobo:toggleChargingLED(toggle)
-    if not self:canToggleChargingLED() then
-        return
-    end
-
     -- We have no way of querying the current state from the HW!
     if toggle == nil then
         return
     end
+    -- Don't do anything if the state is already correct
+    -- NOTE: What happens to the LED when attempting/successfully entering PM is... kind of a mess.
+    --       On a H2O, even *attempting* to enter PM will kill the light (and it'll stay off).
+    --       On a Forma, a failed attempt will *not* affect the light, but a successful one *will* kill it,
+    --       be that standby or suspend, but it'll be restored on wakeup...
+    --       On sunxi, PM appears to have zero effect on the LED.
+    if self.charging_led_state == toggle then
+        return
+    end
+    self.charging_led_state = toggle
+    logger.dbg("Kobo: Turning the charging LED", toggle and "on" or "off")
 
     -- NOTE: While most/all Kobos actually have a charging LED, and it can usually be fiddled with in a similar fashion,
     --       we've seen *extremely* weird behavior in the past when playing with it on older devices (c.f., #5479).
@@ -1126,86 +1328,51 @@ function Kobo:toggleChargingLED(toggle)
     --       (when it does, it's an option in the Energy saving settings),
     --       which is why we also limit ourselves to "true" on devices where this was tested.
     -- c.f., drivers/misc/ntx_misc_light.c
-    local f = io.open("/sys/devices/platform/ntx_led/lit", "we")
-    if not f then
-        logger.err("cannot open /sys/devices/platform/ntx_led/lit for writing!")
+    local fd = C.open(self.ntx_lit_sysfs_knob, bit.bor(C.O_WRONLY, C.O_CLOEXEC)) -- procfs/sysfs, we shouldn't need O_TRUNC
+    if fd == -1 then
+        logger.err("Cannot open file `" .. self.ntx_lit_sysfs_knob .. "`:", ffi.string(C.strerror(ffi.errno())))
         return false
     end
 
-    -- c.f., strace -fittvyy -e trace=ioctl,file,signal,ipc,desc -s 256 -o /tmp/nickel.log -p $(pidof -s nickel) &
+    -- c.f., strace -fittTvyy -e trace=ioctl,file,signal,ipc,desc -s 256 -o /tmp/nickel.log -p $(pidof -s nickel) &
     -- This was observed on a Forma, so I'm mildly hopeful that it's safe on other Mk. 7 devices ;).
     -- NOTE: ch stands for channel, cur for current, dc for duty cycle. c.f., the driver source.
     if toggle == true then
         -- NOTE: Technically, Nickel forces a toggle off before that, too.
         --       But since we do that on startup, it shouldn't be necessary here...
-        if self:isSunxi() then
-            f:write("ch 3")
-            f:flush()
-            f:write("cur 1")
-            f:flush()
-            f:write("dc 63")
-            f:flush()
+        for ch = self.led_uses_channel_3 and 3 or 4, 4 do
+            C.write(fd, "ch " .. tostring(ch), 4)
+            C.write(fd, "cur 1", 5)
+            C.write(fd, "dc 63", 5)
         end
-        f:write("ch 4")
-        f:flush()
-        f:write("cur 1")
-        f:flush()
-        f:write("dc 63")
-        f:flush()
     else
-        f:write("ch 3")
-        f:flush()
-        f:write("cur 1")
-        f:flush()
-        f:write("dc 0")
-        f:flush()
-        f:write("ch 4")
-        f:flush()
-        f:write("cur 1")
-        f:flush()
-        f:write("dc 0")
-        f:flush()
-        f:write("ch 5")
-        f:flush()
-        f:write("cur 1")
-        f:flush()
-        f:write("dc 0")
-        f:flush()
+        for ch = 3, 5 do
+            C.write(fd, "ch " .. tostring(ch), 4)
+            C.write(fd, "cur 1", 5)
+            C.write(fd, "dc 0", 4)
+        end
     end
 
-    f:close()
+    C.close(fd)
 end
 
 -- Return the highest core number
-local function getCPUCount()
+function Kobo:getCPUCount()
     local fd = io.open("/sys/devices/system/cpu/possible", "re")
     if fd then
         local str = fd:read("*line")
         fd:close()
 
         -- Format is n-N, where n is the first core, and N the last (e.g., 0-3)
-        return tonumber(str:match("%d+$")) or 0
+        return tonumber(str:match("%d+$")) or 1
     else
-        return 0
+        return 1
     end
 end
 
 function Kobo:enableCPUCores(amount)
-    if not self:isSMP() then
-        return
-    end
-
-    if not self.cpu_count then
-        self.cpu_count = getCPUCount()
-    end
-
-    -- Not actually SMP or getCPUCount failed...
-    if self.cpu_count == 0 then
-        return
-    end
-
     -- CPU0 is *always* online ;).
-    for n=1, self.cpu_count do
+    for n = 1, self.cpu_count do
         local path = "/sys/devices/system/cpu/cpu" .. n .. "/online"
         local up
         if n >= amount then
@@ -1214,12 +1381,16 @@ function Kobo:enableCPUCores(amount)
             up = "1"
         end
 
-        local f = io.open(path, "we")
-        if f then
-            f:write(up)
-            f:close()
-        end
+        writeToSys(up, path)
     end
+end
+
+function Kobo:performanceCPUGovernor()
+    writeToSys("performance", self.cpu_governor_knob)
+end
+
+function Kobo:defaultCPUGovernor()
+    writeToSys(self.default_cpu_governor, self.cpu_governor_knob)
 end
 
 function Kobo:isStartupScriptUpToDate()
@@ -1229,6 +1400,122 @@ function Kobo:isStartupScriptUpToDate()
 
     local md5 = require("ffi/MD5")
     return md5.sumFile(current_script) == md5.sumFile(new_script)
+end
+
+function Kobo:setEventHandlers(uimgr)
+    -- Update our module-local
+    UIManager = uimgr
+
+    -- We do not want auto suspend procedure to waste battery during
+    -- suspend. So let's unschedule it when suspending, and restart it after
+    -- resume. Done via the plugin's onSuspend/onResume handlers.
+    UIManager.event_handlers.Suspend = function()
+        self:_beforeSuspend()
+        self:onPowerEvent("Suspend")
+    end
+    UIManager.event_handlers.Resume = function()
+        -- MONOTONIC doesn't tick during suspend,
+        -- invalidate the last battery capacity pull time so that we get up to date data immediately.
+        self:getPowerDevice():invalidateCapacityCache()
+
+        self:onPowerEvent("Resume")
+        self:_afterResume()
+    end
+    UIManager.event_handlers.PowerPress = function()
+        -- Always schedule power off.
+        -- Press the power button for 2+ seconds to shutdown directly from suspend.
+        UIManager:scheduleIn(2, UIManager.poweroff_action)
+    end
+    UIManager.event_handlers.PowerRelease = function()
+        if not UIManager._entered_poweroff_stage then
+            UIManager:unschedule(UIManager.poweroff_action)
+            -- resume if we were suspended
+            if self.screen_saver_mode then
+                if self.screen_saver_lock then
+                    -- This can only happen when some sort of screensaver_delay is set,
+                    -- and the user presses the Power button *after* already having woken up the device.
+                    -- In this case, we want to go back to suspend *without* affecting the screensaver,
+                    -- so we mimic UIManager.event_handlers.Suspend's behavior when *not* in screen_saver_mode ;).
+                    logger.dbg("Pressed power while awake in screen saver mode, going back to suspend...")
+                    self:_beforeSuspend()
+                    self.powerd:beforeSuspend() -- this won't be run by onPowerEvent because we're in screen_saver_mode
+                    self:onPowerEvent("Suspend")
+                else
+                    UIManager.event_handlers.Resume()
+                end
+            else
+                UIManager.event_handlers.Suspend()
+            end
+        end
+    end
+    UIManager.event_handlers.Light = function()
+        self:getPowerDevice():toggleFrontlight()
+    end
+    -- USB plug events with a power-only charger
+    UIManager.event_handlers.Charging = function()
+        self:_beforeCharging()
+        -- NOTE: Plug/unplug events will wake the device up, which is why we put it back to sleep.
+        if self.screen_saver_mode then
+           UIManager.event_handlers.Suspend()
+        end
+    end
+    UIManager.event_handlers.NotCharging = function()
+        -- We need to put the device into suspension, other things need to be done before it.
+        self:usbPlugOut()
+        self:_afterNotCharging()
+        if self.screen_saver_mode then
+           UIManager.event_handlers.Suspend()
+        end
+    end
+    -- USB plug events with a data-aware host
+    UIManager.event_handlers.UsbPlugIn = function()
+        self:_beforeCharging()
+        -- NOTE: Plug/unplug events will wake the device up, which is why we put it back to sleep.
+        if self.screen_saver_mode then
+            UIManager.event_handlers.Suspend()
+        else
+            -- Potentially start an USBMS session
+            local MassStorage = require("ui/elements/mass_storage")
+            MassStorage:start()
+        end
+    end
+    UIManager.event_handlers.UsbPlugOut = function()
+        -- We need to put the device into suspension, other things need to be done before it.
+        self:usbPlugOut()
+        self:_afterNotCharging()
+        if self.screen_saver_mode then
+            UIManager.event_handlers.Suspend()
+        else
+            -- Potentially dismiss the USBMS ConfirmBox
+            local MassStorage = require("ui/elements/mass_storage")
+            MassStorage:dismiss()
+        end
+    end
+    -- Sleep Cover handling
+    if G_reader_settings:isTrue("ignore_power_sleepcover") then
+        -- NOTE: The hardware event itself will wake the kernel up if it's in suspend (:/).
+        --       Let the unexpected wakeup guard handle that.
+        UIManager.event_handlers.SleepCoverClosed = nil
+        UIManager.event_handlers.SleepCoverOpened = nil
+    elseif G_reader_settings:isTrue("ignore_open_sleepcover") then
+        -- Just ignore wakeup events, and do NOT set is_cover_closed,
+        -- so device/generic/device will let us use the power button to wake ;).
+        UIManager.event_handlers.SleepCoverClosed = function()
+            UIManager.event_handlers.Suspend()
+        end
+        UIManager.event_handlers.SleepCoverOpened = function()
+            self.is_cover_closed = false
+        end
+    else
+        UIManager.event_handlers.SleepCoverClosed = function()
+            self.is_cover_closed = true
+            UIManager.event_handlers.Suspend()
+        end
+        UIManager.event_handlers.SleepCoverOpened = function()
+            self.is_cover_closed = false
+            UIManager.event_handlers.Resume()
+        end
+    end
 end
 
 -------------- device probe ------------
@@ -1244,8 +1531,18 @@ elseif codename == "kraken" then
     return KoboKraken
 elseif codename == "phoenix" then
     return KoboPhoenix
-elseif codename == "trilogy" then
-    return KoboTrilogy
+elseif codename == "trilogy" and product_id == "310" then
+    -- This is where things get interesting...
+    -- The early 'A' variant (the actual model name being N905, without any letter suffix, unlike the two other variants)
+    -- does *NOT* feature an internal SD card, and is manufactured in China instead of Taiwan... because it is *NOT* an NTX board.
+    -- c.f., #9742
+    if os.getenv("PLATFORM") == "freescale" then
+        return KoboTrilogyA
+    else
+        return KoboTrilogyB
+    end
+elseif codename == "trilogy" and product_id == "320" then
+    return KoboTrilogyC
 elseif codename == "pixie" then
     return KoboPixie
 elseif codename == "alyssum" then
@@ -1276,6 +1573,8 @@ elseif codename == "cadmus" then
     return KoboCadmus
 elseif codename == "io" then
     return KoboIo
+elseif codename == "goldfinch" then
+    return KoboGoldfinch
 else
-    error("unrecognized Kobo model "..codename)
+    error("unrecognized Kobo model ".. codename .. " with device id " .. product_id)
 end

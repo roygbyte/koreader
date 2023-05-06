@@ -41,7 +41,7 @@ local order = {
         "bookmarks_settings",
     },
     typeset = {
-        "reset_document_settings",
+        "document_settings",
         "----------------------------",
         "set_render_style",
         "style_tweaks",
@@ -86,6 +86,7 @@ local order = {
     },
     device = {
         "keyboard_layout",
+        "external_keyboard",
         "font_ui_fallbacks",
         "----------------------------",
         "time",
@@ -110,7 +111,6 @@ local order = {
         "----------------------------",
         "page_turns_non_touch",
         "android_volume_keys",
-        "android_camera_key",
         "android_haptic_feedback",
         "android_back_button",
         "----------------------------",
@@ -221,6 +221,8 @@ local order = {
     },
     help = {
         "quickstart_guide",
+        "----------------------------",
+        "search_menu",
         "----------------------------",
         "report_bug",
         "----------------------------",

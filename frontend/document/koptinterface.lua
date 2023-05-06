@@ -82,21 +82,21 @@ function OCREngine:onFree()
 end
 
 function KoptInterface:setDefaultConfigurable(configurable)
-    configurable.doc_language = DKOPTREADER_CONFIG_DOC_DEFAULT_LANG_CODE
-    configurable.trim_page = DKOPTREADER_CONFIG_TRIM_PAGE
-    configurable.text_wrap = DKOPTREADER_CONFIG_TEXT_WRAP
-    configurable.detect_indent = DKOPTREADER_CONFIG_DETECT_INDENT
-    configurable.max_columns = DKOPTREADER_CONFIG_MAX_COLUMNS
-    configurable.auto_straighten = DKOPTREADER_CONFIG_AUTO_STRAIGHTEN
-    configurable.justification = DKOPTREADER_CONFIG_JUSTIFICATION
+    configurable.doc_language = G_defaults:readSetting("DKOPTREADER_CONFIG_DOC_DEFAULT_LANG_CODE")
+    configurable.trim_page = G_defaults:readSetting("DKOPTREADER_CONFIG_TRIM_PAGE")
+    configurable.text_wrap = G_defaults:readSetting("DKOPTREADER_CONFIG_TEXT_WRAP")
+    configurable.detect_indent = G_defaults:readSetting("DKOPTREADER_CONFIG_DETECT_INDENT")
+    configurable.max_columns = G_defaults:readSetting("DKOPTREADER_CONFIG_MAX_COLUMNS")
+    configurable.auto_straighten = G_defaults:readSetting("DKOPTREADER_CONFIG_AUTO_STRAIGHTEN")
+    configurable.justification = G_defaults:readSetting("DKOPTREADER_CONFIG_JUSTIFICATION")
     configurable.writing_direction = 0
-    configurable.font_size = DKOPTREADER_CONFIG_FONT_SIZE
-    configurable.page_margin = DKOPTREADER_CONFIG_PAGE_MARGIN
-    configurable.quality = DKOPTREADER_CONFIG_RENDER_QUALITY
-    configurable.contrast = DKOPTREADER_CONFIG_CONTRAST
-    configurable.defect_size = DKOPTREADER_CONFIG_DEFECT_SIZE
-    configurable.line_spacing = DKOPTREADER_CONFIG_LINE_SPACING
-    configurable.word_spacing = DKOPTREADER_CONFIG_DEFAULT_WORD_SPACING
+    configurable.font_size = G_defaults:readSetting("DKOPTREADER_CONFIG_FONT_SIZE")
+    configurable.page_margin = G_defaults:readSetting("DKOPTREADER_CONFIG_PAGE_MARGIN")
+    configurable.quality = G_defaults:readSetting("DKOPTREADER_CONFIG_RENDER_QUALITY")
+    configurable.contrast = G_defaults:readSetting("DKOPTREADER_CONFIG_CONTRAST")
+    configurable.defect_size = G_defaults:readSetting("DKOPTREADER_CONFIG_DEFECT_SIZE")
+    configurable.line_spacing = G_defaults:readSetting("DKOPTREADER_CONFIG_LINE_SPACING")
+    configurable.word_spacing = G_defaults:readSetting("DKOPTREADER_CONFIG_DEFAULT_WORD_SPACING")
 end
 
 function KoptInterface:waitForContext(kc)
@@ -275,7 +275,7 @@ function KoptInterface:getCachedContext(doc, pageno)
         logger.dbg("reflowing page", pageno, "in foreground")
         -- reflow page
         --local secs, usecs = FFIUtil.gettime()
-        page:reflow(kc, doc.render_mode or DRENDER_MODE) -- Fall backs to a default set to DDJVU_RENDER_COLOR
+        page:reflow(kc, doc.render_mode or G_defaults:readSetting("DRENDER_MODE")) -- Fall backs to a default set to DDJVU_RENDER_COLOR
         page:close()
         --local nsecs, nusecs = FFIUtil.gettime()
         --local dur = nsecs - secs + (nusecs - usecs) / 1000000
@@ -285,6 +285,7 @@ function KoptInterface:getCachedContext(doc, pageno)
         self.last_context_size = fullwidth * fullheight + 3072 -- estimation
         DocCache:insert(hash, ContextCacheItem:new{
             persistent = true,
+            doc_path = doc.file,
             size = self.last_context_size,
             kctx = kc
         })
@@ -411,6 +412,7 @@ function KoptInterface:renderOptimizedPage(doc, pageno, rect, zoom, rotation, re
         -- prepare cache item with contained blitbuffer
         local tile = TileCacheItem:new{
             persistent = true,
+            doc_path = doc.file,
             excerpt = Geom:new{
                 x = 0, y = 0,
                 w = fullwidth,
@@ -576,6 +578,7 @@ function KoptInterface:getNativeTextBoxes(doc, pageno)
             kc = self:createContext(doc, pageno)
             DocCache:insert(kctx_hash, ContextCacheItem:new{
                 persistent = true,
+                doc_path = doc.file,
                 size = self.last_context_size or self.default_context_size,
                 kctx = kc,
             })
@@ -1034,6 +1037,7 @@ Get word and word box from `doc` position.
 function KoptInterface:getWordFromPosition(doc, pos)
     local text_boxes = self:getTextBoxes(doc, pos.page)
     if text_boxes then
+        self.last_text_boxes = text_boxes
         if doc.configurable.text_wrap == 1 then
             return self:getWordFromReflowPosition(doc, text_boxes, pos)
         else
@@ -1091,6 +1095,51 @@ function KoptInterface:getWordFromNativePosition(doc, boxes, pos)
     return word_box
 end
 
+function KoptInterface:getSelectedWordContext(word, nb_words, pos)
+    local boxes = self.last_text_boxes
+    if not pos or not boxes or #boxes == 0 then return end
+    local i, j = getWordBoxIndices(boxes, pos)
+    if boxes[i][j].word ~= word then return end
+
+    local li, wi = i, j
+    local prev_count, next_count = 0, 0
+    local prev_text, next_text = {}, {}
+    while prev_count < nb_words do
+        if li == 1 and wi == 1 then
+            break
+        elseif wi == 1 then
+            li = li - 1
+            wi = #boxes[li]
+        else
+            wi = wi - 1
+        end
+        local current_word = boxes[li][wi].word
+        if #current_word > 0 then
+            table.insert(prev_text, 1, current_word)
+            prev_count = prev_count + 1
+        end
+    end
+
+    li, wi = i, j
+    while next_count < nb_words do
+        if li == #boxes and wi == #boxes[li] then
+            break
+        elseif wi == #boxes[li] then
+            li = li + 1
+            wi = 1
+        else
+            wi = wi + 1
+        end
+        local current_word = boxes[li][wi].word
+        if #current_word > 0 then
+            table.insert(next_text, current_word)
+            next_count = next_count + 1
+        end
+    end
+    if #prev_text == 0 and #next_text == 0 then return end
+    return table.concat(prev_text, " "), table.concat(next_text, " ")
+end
+
 --[[--
 Get link from position in screen page.
 ]]--
@@ -1135,7 +1184,7 @@ Transform position in native page to reflowed page.
 ]]--
 function KoptInterface:nativeToReflowPosTransform(doc, pageno, pos)
     local kc = self:getCachedContext(doc, pageno)
-    local rpos = {}
+    local rpos = {page = pageno}
     rpos.x, rpos.y = kc:nativeToReflowPosTransform(pos.x, pos.y)
     return rpos
 end
@@ -1145,7 +1194,7 @@ Transform position in reflowed page to native page.
 ]]--
 function KoptInterface:reflowToNativePosTransform(doc, pageno, abs_pos, rel_pos)
     local kc = self:getCachedContext(doc, pageno)
-    local npos = {}
+    local npos = {page = pageno}
     npos.x, npos.y = kc:reflowToNativePosTransform(abs_pos.x, abs_pos.y, rel_pos.x, rel_pos.y)
     return npos
 end
@@ -1245,6 +1294,11 @@ Returns 1 if positions are ordered (if ppos2 is after ppos1), -1 if not, 0 if sa
 Positions of the word boxes containing ppos1 and ppos2 are compared.
 --]]
 function KoptInterface:comparePositions(doc, ppos1, ppos2)
+    if ppos1.page < ppos2.page then
+        return 1
+    elseif ppos1.page > ppos2.page then
+        return -1
+    end
     local box1 = self:getWordFromPosition(doc, ppos1).pbox
     local box2 = self:getWordFromPosition(doc, ppos2).pbox
     if box1.y == box2.y then

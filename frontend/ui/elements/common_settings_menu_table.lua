@@ -18,8 +18,7 @@ if Device:isCervantes() then
         common_settings.start_bq = {
             text = T(_("Start %1 reader app"), "BQ"),
             callback = function()
-                UIManager:quit()
-                UIManager._exit_code = 87
+                UIManager:quit(87)
             end,
         }
     end
@@ -92,9 +91,9 @@ common_settings.time = {
             sub_item_table = {
                 {
                     text_func = function()
-                        local util = require('util');
+                        local datetime = require("datetime")
                         -- sample text shows 1:23:45
-                        local duration_format_str = util.secondsToClockDuration("classic", 5025, false);
+                        local duration_format_str = datetime.secondsToClockDuration("classic", 5025, false)
                         return T(_("Classic (%1)"), duration_format_str)
                     end,
                     checked_func = function()
@@ -107,9 +106,9 @@ common_settings.time = {
                 },
                 {
                     text_func = function()
-                        local util = require('util');
+                        local datetime = require("datetime")
                         -- sample text shows 1h23m45s
-                        local duration_format_str = util.secondsToClockDuration("modern", 5025, false);
+                        local duration_format_str = datetime.secondsToClockDuration("modern", 5025, false)
                         return T(_("Modern (%1)"), duration_format_str)
                     end,
                     checked_func = function()
@@ -199,9 +198,7 @@ if Device:isKobo() then
         callback = function()
             G_reader_settings:toggle("ignore_power_sleepcover")
             G_reader_settings:makeFalse("ignore_open_sleepcover")
-            UIManager:show(InfoMessage:new{
-                text = _("This will take effect on next restart."),
-            })
+            UIManager:askForRestart()
         end
     }
 
@@ -213,9 +210,7 @@ if Device:isKobo() then
         callback = function()
             G_reader_settings:toggle("ignore_open_sleepcover")
             G_reader_settings:makeFalse("ignore_power_sleepcover")
-            UIManager:show(InfoMessage:new{
-                text = _("This will take effect on next restart."),
-            })
+            UIManager:askForRestart()
         end
     }
 end
@@ -273,9 +268,7 @@ if not Device:isAlwaysFullscreen() then
                 local api = Device.firmware_rev
                 local needs_restart = api < 19 and api >= 16
                 if needs_restart then
-                    UIManager:show(InfoMessage:new{
-                        text = _("This will take effect on next restart.")
-                    })
+                    UIManager:askForRestart()
                 end
             end
         end,
@@ -309,13 +302,6 @@ if Device:isAndroid() then
             android.setVolumeKeysIgnored(not is_ignored)
             G_reader_settings:saveSetting("android_ignore_volume_keys", not is_ignored)
         end,
-    }
-
-    -- camera key events
-    common_settings.android_camera_key = {
-        text = _("Camera key toggles touchscreen support"),
-        checked_func = function() return G_reader_settings:isTrue("camera_key_toggles_touchscreen") end,
-        callback = function() G_reader_settings:flipNilOrFalse("camera_key_toggles_touchscreen") end,
     }
 
     common_settings.android_back_button = {
@@ -458,9 +444,7 @@ if Device:hasKeyboard() then
         end,
         callback = function()
             G_reader_settings:flipNilOrFalse("backspace_as_back")
-            UIManager:show(InfoMessage:new{
-                text = _("This will take effect on next restart."),
-            })
+            UIManager:askForRestart()
         end,
     }
 end
@@ -623,6 +607,14 @@ common_settings.units = {
             keep_menu_open = true,
         },
     },
+}
+
+common_settings.search_menu = {
+    text = _("Menu search"),
+    callback = function()
+        UIManager:sendEvent(Event:new("ShowMenuSearch"))
+    end,
+    keep_menu_open = true,
 }
 
 return common_settings

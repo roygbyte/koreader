@@ -191,6 +191,7 @@ if [ "${VIA_NICKEL}" = "true" ]; then
 
     # If bluetooth is enabled, kill it.
     if [ -e "/sys/devices/platform/bt/rfkill/rfkill0/state" ]; then
+        # That's on sunxi, at least
         IFS= read -r bt_state <"/sys/devices/platform/bt/rfkill/rfkill0/state"
         if [ "${bt_state}" = "1" ]; then
             echo "0" >"/sys/devices/platform/bt/rfkill/rfkill0/state"
@@ -198,6 +199,10 @@ if [ "${VIA_NICKEL}" = "true" ]; then
             # Power the chip down
             ./luajit frontend/device/kobo/ntx_io.lua 126 0
         fi
+    fi
+    if grep -q "^sdio_bt_pwr" "/proc/modules"; then
+        # And that's on NXP SoCs
+        rmmod sdio_bt_pwr
     fi
 
     # Flush disks, might help avoid trashing nickel's DB...
@@ -606,8 +611,18 @@ if [ ${RETURN_VALUE} -ne ${KO_RC_HALT} ]; then
         # if we were called from advboot then we must reboot to go to the menu
         # NOTE: This is actually achieved by checking if KSM or a KSM-related script is running:
         #       This might lead to false-positives if you use neither KSM nor advboot to launch KOReader *without nickel running*.
-        if ! pgrep -f kbmenu >/dev/null 2>&1; then
+        if ! pkill -0 -f kbmenu; then
             /sbin/reboot
+        fi
+    fi
+else
+    if [ "${VIA_NICKEL}" = "false" ]; then
+        if pkill -0 -f kbmenu; then
+            # If we were started by KSM and requested an exit, attempt to *NOT* exit the script,
+            # so as not to re-enter KSM at all, to make sure the device powers off with our own ScreenSaver displayed.
+            # NOTE: This might not be fool-proof, as a poweroff might take longer than that,
+            #       or we might be interrupted early by signals.
+            sleep 10
         fi
     fi
 fi

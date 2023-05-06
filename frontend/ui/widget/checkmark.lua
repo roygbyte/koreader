@@ -17,11 +17,11 @@ Example:
 local BD = require("ui/bidi")
 local Blitbuffer = require("ffi/blitbuffer")
 local Font = require("ui/font")
-local InputContainer = require("ui/widget/container/inputcontainer")
 local OverlapGroup = require("ui/widget/overlapgroup")
 local TextWidget = require("ui/widget/textwidget")
+local WidgetContainer = require("ui/widget/container/widgetcontainer")
 
-local CheckMark = InputContainer:new{
+local CheckMark = WidgetContainer:extend{
     checkable = true,
     checked = false,
     enabled = true,
@@ -82,6 +82,15 @@ function CheckMark:init()
     end
     self[1] = widget
     self.dimen = unchecked_widget:getSize()
+end
+
+function CheckMark:paintTo(bb, x, y)
+    -- NOTE: Account for alignment/offsets computation being tacked on to self.dimen...
+    --       This is dumb and probably means we're doing something wonky... somewhere, but it works,
+    --       and allows us to keep sensible coordinates in dimen, so that they can be used for hitbox checks.
+    WidgetContainer.paintTo(self, bb, x - self.dimen.x, y - self.dimen.y)
+    self.dimen.x = x
+    self.dimen.y = y
 end
 
 return CheckMark

@@ -2,9 +2,8 @@ local EventListener = require("ui/widget/eventlistener")
 local Event = require("ui/event")
 local ReaderZooming = require("apps/reader/modules/readerzooming")
 local UIManager = require("ui/uimanager")
-local util = require("util")
 
-local ReaderKoptListener = EventListener:new{}
+local ReaderKoptListener = EventListener:extend{}
 
 function ReaderKoptListener:setZoomMode(zoom_mode)
     if self.document.configurable.text_wrap == 1 then
@@ -19,9 +18,7 @@ function ReaderKoptListener:onReadSettings(config)
     -- normal zoom mode is zoom mode used in non-reflow mode.
     local normal_zoom_mode = config:readSetting("normal_zoom_mode")
                           or ReaderZooming:combo_to_mode(G_reader_settings:readSetting("kopt_zoom_mode_genus"), G_reader_settings:readSetting("kopt_zoom_mode_type"))
-    normal_zoom_mode = util.arrayContains(ReaderZooming.available_zoom_modes, normal_zoom_mode)
-                   and normal_zoom_mode
-                    or ReaderZooming.DEFAULT_ZOOM_MODE
+    normal_zoom_mode = ReaderZooming.zoom_mode_label[normal_zoom_mode] and normal_zoom_mode or ReaderZooming.DEFAULT_ZOOM_MODE
     self.normal_zoom_mode = normal_zoom_mode
     self:setZoomMode(normal_zoom_mode)
     self.document.configurable.contrast = config:readSetting("kopt_contrast")
@@ -68,9 +65,9 @@ end
 function ReaderKoptListener:onDocLangUpdate(lang)
     if lang == "chi_sim" or lang == "chi_tra" or
         lang == "jpn" or lang == "kor" then
-        self.document.configurable.word_spacing = DKOPTREADER_CONFIG_WORD_SPACINGS[1]
+        self.document.configurable.word_spacing = G_defaults:readSetting("DKOPTREADER_CONFIG_WORD_SPACINGS")[1]
     else
-        self.document.configurable.word_spacing = DKOPTREADER_CONFIG_WORD_SPACINGS[3]
+        self.document.configurable.word_spacing = G_defaults:readSetting("DKOPTREADER_CONFIG_WORD_SPACINGS")[3]
     end
 end
 

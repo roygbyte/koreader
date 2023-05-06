@@ -23,6 +23,7 @@ local UIManager = require("ui/uimanager")
 local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
 local Widget = require("ui/widget/widget")
+local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local Input = Device.input
 local Screen = Device.screen
 local logger = require("logger")
@@ -30,7 +31,7 @@ local util = require("util")
 local _ = require("gettext")
 
 -- BookMapRow (reused by PageBrowserWidget)
-local BookMapRow = InputContainer:new{
+local BookMapRow = WidgetContainer:extend{
     width = nil,
     height = nil,
     pages_frame_border = Size.border.default,
@@ -102,7 +103,7 @@ end
 
 function BookMapRow:init()
     local _mirroredUI = BD.mirroredUILayout()
-    self.dimen = Geom:new{ w = self.width, h = self.height }
+    self.dimen = Geom:new{ x = 0, y = 0, w = self.width, h = self.height }
 
     -- Keep one span_height under baseline (frame bottom border) for indicators (current page, bookmarks)
     self.pages_frame_height = self.height - self.span_height
@@ -331,7 +332,7 @@ function BookMapRow:init()
             end
             local color = Blitbuffer.COLOR_BLACK
             if self.current_session_duration and self.read_pages[page][2] < self.current_session_duration then
-                color = Blitbuffer.COLOR_DIM_GRAY
+                color = Blitbuffer.COLOR_GRAY_5
             end
             table.insert(self.pages_markers, {
                 x = x, y = y,
@@ -397,7 +398,7 @@ function BookMapRow:init()
             local y = self.pages_frame_height + 1
             if self.bookmarked_pages[page] then
                 -- Shift it a bit down to keep bookmark glyph(s) readable
-                y = y + math.floor(self.span_height / 3)
+                y = y + math.floor(self.span_height * (1/3))
             end
             local num = self.previous_locations[page]
             table.insert(self.indicators, {
@@ -414,7 +415,7 @@ function BookMapRow:init()
             local y = self.pages_frame_height + 1
             if self.bookmarked_pages[page] then
                 -- Shift it a bit down to keep bookmark glyph(s) readable
-                y = y + math.floor(self.span_height / 3)
+                y = y + math.floor(self.span_height * (1/3))
             end
             table.insert(self.indicators, {
                 c = self.extra_symbols_pages[page],
@@ -429,7 +430,7 @@ function BookMapRow:init()
             local y = self.pages_frame_height + 1
             if self.bookmarked_pages[page] then
                 -- Shift it a bit down to keep bookmark glyph(s) readable
-                y = y + math.floor(self.span_height / 3)
+                y = y + math.floor(self.span_height * (1/3))
             end
             table.insert(self.indicators, {
                 c = 0x25B2, -- black up-pointing triangle
@@ -517,7 +518,7 @@ function BookMapRow:paintTo(bb, x, y)
 end
 
 -- BookMapWidget: shows a map of content, including TOC, boomarks, read pages, non-linear flows...
-local BookMapWidget = InputContainer:new{
+local BookMapWidget = InputContainer:extend{
     title = _("Book map"),
     -- Focus page: show the BookMapRow containing this page
     -- in the middle of screen
@@ -538,6 +539,8 @@ function BookMapWidget:init()
 
     -- Compute non-settings-dependant sizes and options
     self.dimen = Geom:new{
+        x = 0,
+        y = 0,
         w = Screen:getWidth(),
         h = Screen:getHeight(),
     }
@@ -545,43 +548,45 @@ function BookMapWidget:init()
 
     if Device:hasKeys() then
         self.key_events = {
-            Close = { {Input.group.Back}, doc = "close page" },
-            ScrollRowUp = {{"Up"}, doc = "scroll up"},
-            ScrollRowDown = {{"Down"}, doc = "scrol down"},
-            ScrollPageUp = {{Input.group.PgBack}, doc = "prev page"},
-            ScrollPageDown = {{Input.group.PgFwd}, doc = "next page"},
+            Close = { { Input.group.Back } },
+            ScrollRowUp = { { "Up" } },
+            ScrollRowDown = { { "Down" } },
+            ScrollPageUp = { { Input.group.PgBack } },
+            ScrollPageDown = { { Input.group.PgFwd } },
         }
     end
     if Device:isTouchDevice() then
-        self.ges_events.Swipe = {
-            GestureRange:new{
-                ges = "swipe",
-                range = self.dimen,
-            }
-        }
-        self.ges_events.MultiSwipe = {
-            GestureRange:new{
-                ges = "multiswipe",
-                range = self.dimen,
-            }
-        }
-        self.ges_events.Tap = {
-            GestureRange:new{
-                ges = "tap",
-                range = self.dimen,
-            }
-        }
-        self.ges_events.Pinch = {
-            GestureRange:new{
-                ges = "pinch",
-                range = self.dimen,
-            }
-        }
-        self.ges_events.Spread = {
-            GestureRange:new{
-                ges = "spread",
-                range = self.dimen,
-            }
+        self.ges_events = {
+            Swipe = {
+                GestureRange:new{
+                    ges = "swipe",
+                    range = self.dimen,
+                }
+            },
+            MultiSwipe = {
+                GestureRange:new{
+                    ges = "multiswipe",
+                    range = self.dimen,
+                }
+            },
+            Tap = {
+                GestureRange:new{
+                    ges = "tap",
+                    range = self.dimen,
+                }
+            },
+            Pinch = {
+                GestureRange:new{
+                    ges = "pinch",
+                    range = self.dimen,
+                }
+            },
+            Spread = {
+                GestureRange:new{
+                    ges = "spread",
+                    range = self.dimen,
+                }
+            },
         }
         -- No need for any long-press handler: page slots may be small and we can't
         -- really target a precise page slot with our fat finger above it...
@@ -1320,7 +1325,7 @@ end
 function BookMapWidget:onSpread(arg, ges)
     local updated = false
     if ges.direction == "horizontal" or ges.direction == "diagonal" then
-        local new_pages_per_row = math.floor(self.pages_per_row / 1.5)
+        local new_pages_per_row = math.floor(self.pages_per_row * (2/3))
         if (self.pages_per_row < self.fit_pages_per_row and new_pages_per_row > self.fit_pages_per_row)
                 or (self.pages_per_row > self.fit_pages_per_row and new_pages_per_row < self.fit_pages_per_row) then
             new_pages_per_row = self.fit_pages_per_row

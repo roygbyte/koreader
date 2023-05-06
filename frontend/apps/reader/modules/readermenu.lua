@@ -13,10 +13,10 @@ local Screen = Device.screen
 local _ = require("gettext")
 local T = require("ffi/util").template
 
-local ReaderMenu = InputContainer:new{
+local ReaderMenu = InputContainer:extend{
     tab_item_table = nil,
-    menu_items = {},
-    registered_widgets = {},
+    menu_items = nil, -- table, mandatory
+    registered_widgets = nil, -- array
 }
 
 function ReaderMenu:init()
@@ -56,38 +56,50 @@ function ReaderMenu:init()
 
     self.registered_widgets = {}
 
-    if Device:hasKeys() then
-        if Device:isTouchDevice() then
-            self.key_events.TapShowMenu = { { "Menu" }, doc = "show menu", }
-            if Device:hasFewKeys() then
-                self.key_events.TapShowMenu = { { { "Menu", "Right" } }, doc = "show menu", }
-            end
-        else
-            -- map menu key to only top menu because bottom menu is only
-            -- designed for touch devices
-            self.key_events.ShowMenu = { { "Menu" }, doc = "show menu", }
-            if Device:hasFewKeys() then
-                self.key_events.ShowMenu = { { { "Menu", "Right" } }, doc = "show menu", }
-            end
-        end
-    end
+    self:registerKeyEvents()
+
     if G_reader_settings:has("activate_menu") then
         self.activation_menu = G_reader_settings:readSetting("activate_menu")
     else
         self.activation_menu = "swipe_tap"
     end
+
+    -- delegate gesture listener to readerui, NOP our own
+    self.ges_events = nil
 end
+
+function ReaderMenu:onGesture() end
+
+function ReaderMenu:registerKeyEvents()
+    if Device:hasKeys() then
+        if Device:isTouchDevice() then
+            self.key_events.PressMenu = { { "Menu" } }
+            if Device:hasFewKeys() then
+                self.key_events.PressMenu = { { { "Menu", "Right" } } }
+            end
+        else
+            -- Map Menu key to top menu only, because the bottom menu is only designed for touch devices.
+            --- @fixme: Is this still the case?
+            ---         (Swapping between top and bottom might not be implemented, though, so it might still be a good idea).
+            self.key_events.ShowMenu = { { "Menu" } }
+            if Device:hasFewKeys() then
+                self.key_events.ShowMenu = { { { "Menu", "Right" } } }
+            end
+        end
+    end
+end
+
+ReaderMenu.onPhysicalKeyboardConnected = ReaderMenu.registerKeyEvents
 
 function ReaderMenu:getPreviousFile()
     return require("readhistory"):getPreviousFile(self.ui.document.file)
 end
 
 function ReaderMenu:onReaderReady()
-    -- deligate gesture listener to readerui
-    self.ges_events = {}
-    self.onGesture = nil
     if not Device:isTouchDevice() then return end
 
+    local DTAP_ZONE_MENU = G_defaults:readSetting("DTAP_ZONE_MENU")
+    local DTAP_ZONE_MENU_EXT = G_defaults:readSetting("DTAP_ZONE_MENU_EXT")
     self.ui:registerTouchZones({
         {
             id = "readermenu_tap",
@@ -176,23 +188,46 @@ function ReaderMenu:setUpdateItemTable()
     end
 
     -- typeset tab
-    self.menu_items.reset_document_settings = {
-        text = _("Reset document settings to default"),
-        keep_menu_open = true,
-        callback = function()
-            UIManager:show(ConfirmBox:new{
-                text = _("Reset current document settings to their default values?\n\nReading position, highlights and bookmarks will be kept.\nThe document will be reloaded."),
-                ok_text = _("Reset"),
-                ok_callback = function()
-                    local current_file = self.ui.document.file
-                    self:onTapCloseMenu()
-                    self.ui:onClose()
-                    require("apps/filemanager/filemanagerutil").resetDocumentSettings(current_file)
-                    require("apps/reader/readerui"):showReader(current_file)
+    self.menu_items.document_settings = {
+        text = _("Document settings"),
+        sub_item_table = {
+            {
+                text = _("Reset document settings to default"),
+                keep_menu_open = true,
+                callback = function()
+                    UIManager:show(ConfirmBox:new{
+                        text = _("Reset current document settings to their default values?\n\nReading position, highlights and bookmarks will be kept.\nThe document will be reloaded."),
+                        ok_text = _("Reset"),
+                        ok_callback = function()
+                            local current_file = self.ui.document.file
+                            self:onTapCloseMenu()
+                            self.ui:onClose()
+                            require("apps/filemanager/filemanagerutil").resetDocumentSettings(current_file)
+                            require("apps/reader/readerui"):showReader(current_file)
+                        end,
+                    })
                 end,
-            })
-        end,
+            },
+            {
+                text = _("Save document settings as default"),
+                keep_menu_open = true,
+                callback = function()
+                    UIManager:show(ConfirmBox:new{
+                        text = _("Save current document settings as default values?"),
+                        ok_text = _("Save"),
+                        ok_callback = function()
+                            self:onTapCloseMenu()
+                            self:saveDocumentSettingsAsDefault()
+                            UIManager:show(require("ui/widget/notification"):new{
+                                text = _("Default settings updated"),
+                            })
+                        end,
+                    })
+                end,
+            },
+        },
     }
+
     self.menu_items.page_overlap = require("ui/elements/page_overlap")
 
     -- settings tab
@@ -215,10 +250,14 @@ function ReaderMenu:setUpdateItemTable()
 
     if Device:supportsScreensaver() then
         local ss_book_settings = {
-            text = _("Exclude this book's cover from screensaver"),
+            text = _("Exclude this book's content and cover from screensaver"),
             enabled_func = function()
-                return not (self.ui == nil or self.ui.document == nil)
-                    and G_reader_settings:readSetting("screensaver_type") == "cover"
+                if self.ui and self.ui.document then
+                    local screensaverType = G_reader_settings:readSetting("screensaver_type")
+                    return screensaverType == "cover" or screensaverType == "disable"
+                else
+                    return false
+                end
             end,
             checked_func = function()
                 return self.ui and self.ui.doc_settings and self.ui.doc_settings:isTrue("exclude_screensaver")
@@ -303,6 +342,21 @@ dbg:guard(ReaderMenu, 'setUpdateItemTable',
         end
     end)
 
+function ReaderMenu:saveDocumentSettingsAsDefault()
+    local prefix
+    if self.ui.rolling then
+        G_reader_settings:saveSetting("cre_font", self.ui.font.font_face)
+        G_reader_settings:saveSetting("copt_css", self.ui.document.default_css)
+        G_reader_settings:saveSetting("style_tweaks", self.ui.styletweak.global_tweaks)
+        prefix = "copt_"
+    else
+        prefix = "kopt_"
+    end
+    for k, v in pairs(self.ui.document.configurable) do
+        G_reader_settings:saveSetting(prefix .. k, v)
+    end
+end
+
 function ReaderMenu:exitOrRestart(callback, force)
     if self.menu_container then self:onTapCloseMenu() end
 
@@ -384,7 +438,7 @@ function ReaderMenu:onShowMenu(tab_index)
     end
 
     main_menu.close_callback = function()
-        self.ui:handleEvent(Event:new("CloseReaderMenu"))
+        self:onCloseReaderMenu()
     end
 
     main_menu.touch_menu_callback = function ()
@@ -431,10 +485,10 @@ function ReaderMenu:_getTabIndexFromLocation(ges)
     if not ges then
         return self.last_tab_index
     -- if the start position is far right
-    elseif ges.pos.x > 2 * Screen:getWidth() / 3 then
+    elseif ges.pos.x > Screen:getWidth() * (2/3) then
         return BD.mirroredUILayout() and 1 or #self.tab_item_table
     -- if the start position is far left
-    elseif ges.pos.x < Screen:getWidth() / 3 then
+    elseif ges.pos.x < Screen:getWidth() * (1/3) then
         return BD.mirroredUILayout() and #self.tab_item_table or 1
     -- if center return the last index
     else
@@ -447,7 +501,7 @@ function ReaderMenu:onSwipeShowMenu(ges)
         if G_reader_settings:nilOrTrue("show_bottom_menu") then
             self.ui:handleEvent(Event:new("ShowConfigMenu"))
         end
-        self.ui:handleEvent(Event:new("ShowMenu", self:_getTabIndexFromLocation(ges)))
+        self:onShowMenu(self:_getTabIndexFromLocation(ges))
         self.ui:handleEvent(Event:new("HandledAsSwipe")) -- cancel any pan scroll made
         return true
     end
@@ -458,13 +512,21 @@ function ReaderMenu:onTapShowMenu(ges)
         if G_reader_settings:nilOrTrue("show_bottom_menu") then
             self.ui:handleEvent(Event:new("ShowConfigMenu"))
         end
-        self.ui:handleEvent(Event:new("ShowMenu", self:_getTabIndexFromLocation(ges)))
+        self:onShowMenu(self:_getTabIndexFromLocation(ges))
         return true
     end
 end
 
+function ReaderMenu:onPressMenu()
+    if G_reader_settings:nilOrTrue("show_bottom_menu") then
+        self.ui:handleEvent(Event:new("ShowConfigMenu"))
+    end
+    self:onShowMenu()
+    return true
+end
+
 function ReaderMenu:onTapCloseMenu()
-    self.ui:handleEvent(Event:new("CloseReaderMenu"))
+    self:onCloseReaderMenu()
     self.ui:handleEvent(Event:new("CloseConfigMenu"))
 end
 
@@ -474,6 +536,11 @@ end
 
 function ReaderMenu:onSaveSettings()
     self.ui.doc_settings:saveSetting("readermenu_tab_index", self.last_tab_index)
+end
+
+function ReaderMenu:onMenuSearch()
+    self:onShowMenu()
+    self.menu_container[1]:onShowMenuSearch()
 end
 
 function ReaderMenu:registerToMainMenu(widget)

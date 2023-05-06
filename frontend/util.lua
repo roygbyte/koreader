@@ -3,6 +3,8 @@ This module contains miscellaneous helper functions for the KOReader frontend.
 ]]
 
 local BaseUtil = require("ffi/util")
+local Utf8Proc = require("ffi/utf8proc")
+local lfs = require("libs/libkoreader-lfs")
 local _ = require("gettext")
 local C_ = _.pgettext
 local T = BaseUtil.template
@@ -99,219 +101,6 @@ function util.gsplit(str, pattern, capture, capture_empty_entity)
     end)
 end
 
--- Stupid helper for the duration stuff
-local function passthrough(n)
-    return n
-end
-
---[[--
-Converts seconds to a clock string.
-
-Source: <a href="https://gist.github.com/jesseadams/791673">https://gist.github.com/jesseadams/791673</a>
-]]
----- @int seconds number of seconds
----- @bool withoutSeconds if true 00:00, if false 00:00:00
----- @treturn string clock string in the form of 00:00 or 00:00:00
-function util.secondsToClock(seconds, withoutSeconds, withDays)
-    seconds = tonumber(seconds)
-    if not seconds then
-        if withoutSeconds then
-            return "--:--"
-        else
-            return "--:--:--"
-        end
-    elseif seconds == 0 or seconds ~= seconds then
-        if withoutSeconds then
-            return "00:00"
-        else
-            return "00:00:00"
-        end
-    else
-        local round = withoutSeconds and require("optmath").round or passthrough
-        local days = "0"
-        local hours
-        if withDays then
-            days = string.format("%d", seconds / (24*3600)) -- implicit math.floor for string.format
-            hours = string.format("%02d", (seconds / 3600) % 24)
-        else
-            hours = string.format("%02d", seconds / 3600)
-        end
-        local mins = string.format("%02d", round(seconds % 3600 / 60))
-        if withoutSeconds then
-            if mins == "60" then
-                -- Can only happen because of rounding, which only happens if withoutSeconds...
-                mins = string.format("%02d", 0)
-                hours = string.format("%02d", hours + 1)
-            end
-            return  (days ~= "0" and (days .. "d") or "") .. hours .. ":" .. mins
-        else
-            local secs = string.format("%02d", seconds % 60)
-            return (days ~= "0" and (days .. "d") or "") .. hours .. ":" .. mins .. ":" .. secs
-        end
-    end
-end
-
---- Converts seconds to a period of time string.
----- @int seconds number of seconds
----- @bool withoutSeconds if true 1h30', if false 1h30'10"
----- @bool hmsFormat, if true format 1h30m10s
----- @bool withDays, if true format 1d12h30m10s
----- @treturn string clock string in the form of 1h30'10" or 1h30m10s
-function util.secondsToHClock(seconds, withoutSeconds, hmsFormat, withDays, compact)
-    local SECONDS_SYMBOL = "\""
-    seconds = tonumber(seconds)
-    if seconds == 0 then
-        if withoutSeconds then
-            if hmsFormat then
-                return T(_("%1m"), "0")
-            else
-                return "0'"
-            end
-        else
-            if hmsFormat then
-                return T(C_("Time", "%1s"), "0")
-            else
-                return "0" .. SECONDS_SYMBOL
-            end
-        end
-    elseif seconds < 60 then
-        if withoutSeconds and seconds < 30 then
-            if hmsFormat then
-                return T(C_("Time", "%1m"), "0")
-            else
-                return "0'"
-            end
-        elseif withoutSeconds and seconds >= 30 then
-            if hmsFormat then
-                return T(C_("Time", "%1m"), "1")
-            else
-                return "1'"
-            end
-        else
-            if hmsFormat then
-                if compact then
-                    return T(C_("Time", "%1s"), string.format("%d", seconds))
-                else
-                    return T(C_("Time", "%1m%2s"), "0", string.format("%02d", seconds))
-                end
-            else
-                if compact then
-                    return string.format("%d", seconds) .. SECONDS_SYMBOL
-                else
-                    return "0'" .. string.format("%02d", seconds) .. SECONDS_SYMBOL
-                end
-            end
-        end
-    else
-        local time_string = util.secondsToClock(seconds, withoutSeconds, withDays)
-        if withoutSeconds then
-            time_string = time_string .. ":"
-        end
-        time_string = time_string:gsub(":", C_("Time", "h"), 1)
-        time_string = time_string:gsub(":", C_("Time", "m"), 1)
-        time_string = time_string:gsub("^00" .. C_("Time", "h"), "") -- delete leading "00h"
-        time_string = time_string:gsub("^00" .. C_("Time", "m"), "") -- delete leading "00m"
-        if time_string:find("^0%d") then
-            time_string = time_string:gsub("^0", "") -- delete leading "0"
-        end
-        if withoutSeconds and time_string == "" then
-            time_string = "0" .. C_("Time", "m")
-        end
-
-        if hmsFormat then
-            return withoutSeconds and time_string or (time_string .. C_("Time", "s"))
-        else
-            time_string = time_string:gsub(C_("Time", "m"), "'") -- replace m with '
-            return withoutSeconds and time_string or (time_string .. SECONDS_SYMBOL)
-        end
-    end
-end
-
---- Converts seconds to a clock type (classic or modern), based on the given format preference
---- "Classic" format calls secondsToClock, and "Modern" format calls secondsToHClock
----- @string Either "modern" for 1h30'10" or "classic" for 1:30:10
----- @bool withoutSeconds if true 1h30' or 1h30m, if false 1h30'10" or 1h30m10s
----- @bool hmsFormat, modern format only, if true format 1h30m or 1h30m10s
----- @bool withDays, if hours>=24 include days in clock string 1d12h10m10s
----- @bool compact, if set removes all leading zeros (incl. units if necessary)
----- @treturn string clock string in the specific format of 1h30', 1h30'10" resp. 1h30m, 1h30m10s
-function util.secondsToClockDuration(format, seconds, withoutSeconds, hmsFormat, withDays, compact)
-    if format == "modern" then
-        return util.secondsToHClock(seconds, withoutSeconds, hmsFormat, withDays, compact)
-    else
-         -- Assume "classic" to give safe default
-        return util.secondsToClock(seconds, withoutSeconds, withDays)
-    end
-end
-
-if jit.os == "Windows" then
-    --- Converts timestamp to an hour string
-    ---- @int seconds number of seconds
-    ---- @bool twelve_hour_clock
-    ---- @treturn string hour string
-    ---- @note: The MS CRT doesn't support either %l & %k, or the - format modifier (as they're not technically C99 or POSIX).
-    ----        They are otherwise supported on Linux, BSD & Bionic, so, just special-case Windows...
-    ----        We *could* arguably feed the os.date output to gsub("^0(%d)(.*)$", "%1%2"), but, while unlikely,
-    ----        it's conceivable that a translator would put something other that the hour at the front of the string ;).
-    function util.secondsToHour(seconds, twelve_hour_clock)
-        if twelve_hour_clock then
-            if os.date("%p", seconds) == "AM" then
-                -- @translators This is the time in the morning using a 12-hour clock (%I is the hour, %M the minute).
-                return os.date(_("%I:%M AM"), seconds)
-            else
-                -- @translators This is the time in the afternoon using a 12-hour clock (%I is the hour, %M the minute).
-                return os.date(_("%I:%M PM"), seconds)
-            end
-        else
-            -- @translators This is the time using a 24-hour clock (%H is the hour, %M the minute).
-            return os.date(_("%H:%M"), seconds)
-        end
-    end
-else
-    function util.secondsToHour(seconds, twelve_hour_clock, pad_with_spaces)
-        if twelve_hour_clock then
-            if os.date("%p", seconds) == "AM" then
-                if pad_with_spaces then
-                    -- @translators This is the time in the morning using a 12-hour clock (%_I is the hour, %M the minute).
-                    return os.date(_("%_I:%M AM"), seconds)
-                else
-                    -- @translators This is the time in the morning using a 12-hour clock (%-I is the hour, %M the minute).
-                    return os.date(_("%-I:%M AM"), seconds)
-                end
-            else
-                if pad_with_spaces then
-                    -- @translators This is the time in the afternoon using a 12-hour clock (%_I is the hour, %M the minute).
-                    return os.date(_("%_I:%M PM"), seconds)
-                else
-                    -- @translators This is the time in the afternoon using a 12-hour clock (%-I is the hour, %M the minute).
-                    return os.date(_("%-I:%M PM"), seconds)
-                end
-            end
-        else
-            if pad_with_spaces then
-                -- @translators This is the time using a 24-hour clock (%_H is the hour, %M the minute).
-                return os.date(_("%_H:%M"), seconds)
-            else
-                -- @translators This is the time using a 24-hour clock (%-H is the hour, %M the minute).
-                return os.date(_("%-H:%M"), seconds)
-            end
-        end
-    end
-end
-
---- Converts timestamp to a date string
----- @int seconds number of seconds
----- @bool twelve_hour_clock
----- @treturn string date string
-function util.secondsToDate(seconds, twelve_hour_clock)
-    local BD = require("ui/bidi")
-    -- In order to keep stuff aligned, we'll want to *keep* the padding, but using blanks instead of zeroes.
-    local time = util.secondsToHour(seconds, twelve_hour_clock, true)
-    -- @translators This is the date (%Y is the year, %m the month, %d the day)
-    local day = os.date(_("%Y-%m-%d"), seconds)
-    return BD.wrap(day) .. " " .. BD.wrap(time)
-end
-
 --[[--
 Compares values in two different tables.
 
@@ -331,7 +120,7 @@ function util.tableEquals(o1, o2, ignore_mt)
     if not ignore_mt then
         local mt1 = getmetatable(o1)
         if mt1 and mt1.__eq then
-            --compare using built in method
+            -- Compare using built in method
             return o1 == o2
         end
     end
@@ -487,6 +276,73 @@ function util.arrayReferences(t, n, m, l)
     end
 
     return false
+end
+
+-- A set of binary search implementations for plain arrays.
+-- Should be easy to tweak for arrays of hashes (c.f., UIManager:schedule),
+-- or arrays sorted in descending order (c.f., ReadHistory).
+-- refs: https://en.wikipedia.org/wiki/Binary_search_algorithm
+--       https://rosettacode.org/wiki/Binary_search
+--- Perform a binary search for `value` in a *sorted* (ascending) `array`.
+---- @param array Lua table (array only, sorted, ascending, every value must match the type of `value` and support comparison operators)
+---- @param value
+---- @return int index of value in array, or a (nil, insertion index) tuple if value was not found.
+function util.bsearch(array, value)
+    local lo = 1
+    local hi = #array
+    while lo <= hi do
+        -- invariants: value > array[i] for all i < lo
+        --             value < array[i] for all i > hi
+        local mid = bit.rshift(lo + hi, 1)
+        if array[mid] > value then
+            hi = mid - 1
+        elseif array[mid] < value then
+            lo = mid + 1
+        else
+            return mid
+        end
+    end
+    return nil, lo
+end
+
+--- Perform a leftmost insertion binary search for `value` in a *sorted* (ascending) `array`.
+---- @param array Lua table (array only, sorted, ascending, every value must match the type of `value` and support comparison operators)
+---- @param value
+---- @return int leftmost insertion index of value in array.
+function util.bsearch_left(array, value)
+    local lo = 1
+    local hi = #array
+    while lo <= hi do
+        -- invariants: value > array[i] for all i < lo
+        --             value <= array[i] for all i > hi
+        local mid = bit.rshift(lo + hi, 1)
+        if array[mid] >= value then
+            hi = mid - 1
+        else
+            lo = mid + 1
+        end
+    end
+    return lo
+end
+
+--- Perform a rightmost insertion binary search for `value` in a *sorted* (ascending) `array`.
+---- @param array Lua table (array only, sorted, ascending, every value must match the type of `value` and support comparison operators)
+---- @param value
+---- @return int rightmost insertion index of value in array.
+function util.bsearch_right(array, value)
+    local lo = 1
+    local hi = #array
+    while lo <= hi do
+        -- invariants: value >= array[i] for all i < low
+        --             value < array[i] for all i > high
+        local mid = bit.rshift(lo + hi, 1)
+        if array[mid] > value then
+            hi = mid - 1
+        else
+            lo = mid + 1
+        end
+    end
+    return lo
 end
 
 -- Merge t2 into t1, overwriting existing elements if they already exist
@@ -754,6 +610,97 @@ function util.getFilesystemType(path)
     return type
 end
 
+-- For documentation purposes, here's a battle-tested shell version of calcFreeMem,
+-- our simplified Lua version follows...
+--[[
+    if grep -q 'MemAvailable' /proc/meminfo ; then
+        # We'll settle for 85% of available memory to leave a bit of breathing room
+        tmpfs_size="$(awk '/MemAvailable/ {printf "%d", $2 * 0.85}' /proc/meminfo)"
+    elif grep -q 'Inactive(file)' /proc/meminfo ; then
+        # Basically try to emulate the kernel's computation, c.f., https://unix.stackexchange.com/q/261247
+        # Again, 85% of available memory
+        tmpfs_size="$(awk -v low=$(grep low /proc/zoneinfo | awk '{k+=$2}END{printf "%d", k}') \
+            '{a[$1]=$2}
+            END{
+                printf "%d", (a["MemFree:"]+a["Active(file):"]+a["Inactive(file):"]+a["SReclaimable:"]-(12*low))*0.85;
+            }' /proc/meminfo)"
+    else
+        # Ye olde crap workaround of Free + Buffers + Cache...
+        # Take it with a grain of salt, and settle for 80% of that...
+        tmpfs_size="$(awk \
+            '{a[$1]=$2}
+            END{
+                printf "%d", (a["MemFree:"]+a["Buffers:"]+a["Cached:"])*0.80;
+            }' /proc/meminfo)"
+    fi
+--]]
+
+--- Computes the currently available memory
+---- @treturn tuple of ints: memavailable, memtotal (or nil, nil on unsupported platforms).
+function util:calcFreeMem()
+    local memtotal, memfree, memavailable, buffers, cached
+
+    local meminfo = io.open("/proc/meminfo", "r")
+    if meminfo then
+        for line in meminfo:lines() do
+            if not memtotal then
+                memtotal = line:match("^MemTotal:%s-(%d+) kB")
+                if memtotal then
+                    -- Next!
+                    goto continue
+                end
+            end
+
+            if not memfree then
+                memfree = line:match("^MemFree:%s-(%d+) kB")
+                if memfree then
+                    -- Next!
+                    goto continue
+                end
+            end
+
+            if not memavailable then
+                memavailable = line:match("^MemAvailable:%s-(%d+) kB")
+                if memavailable then
+                    -- Best case scenario, we're done :)
+                    break
+                end
+            end
+
+            if not buffers then
+                buffers = line:match("^Buffers:%s-(%d+) kB")
+                if buffers then
+                    -- Next!
+                    goto continue
+                end
+            end
+
+            if not cached then
+                cached = line:match("^Cached:%s-(%d+) kB")
+                if cached then
+                    -- Ought to be the last entry we care about, we're done
+                    break
+                end
+            end
+
+            ::continue::
+        end
+        meminfo:close()
+    else
+        -- Not on Linux?
+        return nil, nil
+    end
+
+    if memavailable then
+        -- Leave a bit of margin, and report 85% of that...
+        return math.floor(memavailable * 0.85) * 1024, memtotal * 1024
+    else
+        -- Crappy Free + Buffers + Cache version, because the zoneinfo approach is a tad hairy...
+        -- So, leave an even larger margin, and only report 75% of that...
+        return math.floor((memfree + buffers + cached) * 0.75) * 1024, memtotal * 1024
+    end
+end
+
 --- Recursively scan directory for files inside
 -- @string path
 -- @func callback(fullpath, name, attr)
@@ -781,7 +728,6 @@ end
 ---- @string path
 ---- @treturn bool
 function util.isEmptyDir(path)
-    local lfs = require("libs/libkoreader-lfs")
     -- lfs.dir will crash rather than return nil if directory doesn't exist O_o
     local ok, iter, dir_obj = pcall(lfs.dir, path)
     if not ok then return end
@@ -808,7 +754,6 @@ end
 ---- @string path
 ---- @treturn bool
 function util.pathExists(path)
-    local lfs = require("libs/libkoreader-lfs")
     return lfs.attributes(path, "mode") ~= nil
 end
 
@@ -826,7 +771,6 @@ function util.makePath(path)
         return nil, err.." (creating "..path..")"
     end
 
-    local lfs = require("libs/libkoreader-lfs")
     return lfs.mkdir(path)
 end
 
@@ -834,7 +778,6 @@ end
 -- @string path of the file to remove
 -- @treturn bool true on success; nil, err_message on error
 function util.removeFile(file)
-    local lfs = require("libs/libkoreader-lfs")
     if file and lfs.attributes(file, "mode") == "file" then
         return os.remove(file)
     elseif file then
@@ -859,7 +802,6 @@ function util.diskUsage(dir)
         end
     end
     local err = { total = nil, used = nil, available = nil }
-    local lfs = require("libs/libkoreader-lfs")
     if not dir or lfs.attributes(dir, "mode") ~= "directory" then return err end
     local usage = doCommand(dir)
     if not usage then return err end
@@ -1264,8 +1206,8 @@ function util.shell_escape(args)
     return table.concat(escaped_args, " ")
 end
 
---- Clear all the elements from a table without reassignment.
---- @table t the table to be cleared
+--- Clear all the elements from an array without reassignment.
+--- @table t the array to be cleared
 function util.clearTable(t)
     local c = #t
     for i = 0, c do t[i] = nil end
@@ -1312,7 +1254,7 @@ function util.checkLuaSyntax(lua_text)
     end
     -- Replace: [string "blah blah..."]:3: '=' expected near '123'
     -- with: Line 3: '=' expected near '123'
-    err = err:gsub("%[string \".-%\"]:", "Line ")
+    err = err and err:gsub("%[string \".-%\"]:", "Line ")
     return err
 end
 
@@ -1332,6 +1274,41 @@ end
 -- @treturn bool true on success
 function util.stringEndsWith(str, ending)
    return ending == "" or str:sub(-#ending) == ending
+end
+
+--- Search a string in a text.
+-- @string or table txt Text (char list) to search in
+-- @string str String to search for
+-- @boolean case_sensitive
+-- @number start_pos Position number in text to start search from
+-- @treturn number Position number or 0 if not found
+function util.stringSearch(txt, str, case_sensitive, start_pos)
+    if not case_sensitive then
+        str = Utf8Proc.lowercase(util.fixUtf8(str, "?"))
+    end
+    local txt_charlist = type(txt) == "table" and txt or util.splitToChars(txt)
+    local str_charlist = util.splitToChars(str)
+    local str_len = #str_charlist
+    local char_pos, found = 0, 0
+    for i = start_pos - 1, #txt_charlist - str_len do
+        for j = 1, str_len do
+            local char_txt = txt_charlist[i + j]
+            local char_str = str_charlist[j]
+            if not case_sensitive then
+                char_txt = Utf8Proc.lowercase(util.fixUtf8(char_txt, "?"))
+            end
+            if char_txt ~= char_str then
+                found = 0
+                break
+            end
+            found = found + 1
+        end
+        if found == str_len then
+            char_pos = i + 1
+            break
+        end
+    end
+    return char_pos
 end
 
 local WrappedFunction_mt = {

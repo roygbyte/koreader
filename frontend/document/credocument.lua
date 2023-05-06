@@ -9,6 +9,7 @@ local Screen = require("device").screen
 local buffer = require("string.buffer")
 local ffi = require("ffi")
 local C = ffi.C
+local cre -- Delayed loading
 local lfs = require("libs/libkoreader-lfs")
 local logger = require("logger")
 local lru = require("ffi/lru")
@@ -17,7 +18,7 @@ local time = require("ui/time")
 -- engine can be initialized only once, on first document opened
 local engine_initialized = false
 
-local CreDocument = Document:new{
+local CreDocument = Document:extend{
     -- this is defined in kpvcrlib/crengine/crengine/include/lvdocview.h
     SCROLL_VIEW_MODE = 0,
     PAGE_VIEW_MODE = 1,
@@ -48,7 +49,7 @@ local CreDocument = Document:new{
     --   require one to set FreeSans as fallback to get its nicer glyphes, which
     --   would override Noto Sans CJK good symbol glyphs with smaller ones
     --   (Noto Sans & Serif do not have these symbol glyphs).
-    fallback_fonts = {
+    fallback_fonts = { -- const
         "Noto Sans CJK SC",
         "Noto Naskh Arabic",
         "Noto Sans Devanagari UI",
@@ -64,8 +65,8 @@ local CreDocument = Document:new{
     provider_name = "Cool Reader Engine",
 
     hide_nonlinear_flows = false,
-    flows = {},
-    page_in_flow = {},
+    flows = nil, -- table
+    page_in_flow = nil, -- table
     last_linear_page = nil,
 }
 
@@ -107,7 +108,7 @@ end
 
 function CreDocument:engineInit()
     if not engine_initialized then
-        require "libs/libkoreader-cre"
+        cre = require("libs/libkoreader-cre")
         -- initialize cache
         self:cacheInit()
 
@@ -116,9 +117,9 @@ function CreDocument:engineInit()
 
         -- we need to initialize the CRE font list
         local fonts = FontList:getFontList()
-        for _k, _v in ipairs(fonts) do
-            if not _v:find("/urw/") and not _v:find("/nerdfonts/symbols.ttf") then
-                local ok, err = pcall(cre.registerFont, _v)
+        for k, v in ipairs(fonts) do
+            if not v:find("/urw/") and not v:find("/nerdfonts/symbols.ttf") then
+                local ok, err = pcall(cre.registerFont, v)
                 if not ok then
                     logger.err("failed to register crengine font:", err)
                 end
@@ -138,11 +139,16 @@ function CreDocument:engineInit()
 
         engine_initialized = true
     end
+
+    return cre
 end
 
 function CreDocument:init()
     self:updateColorRendering()
     self:engineInit()
+
+    self.flows = {}
+    self.page_in_flow = {}
 
     local file_type = string.lower(string.match(self.file, ".+%.([^.]+)"))
     if file_type == "zip" then
@@ -164,7 +170,7 @@ function CreDocument:init()
     end
 
     -- This mode must be the same as the default one set as ReaderView.view_mode
-    self._view_mode = DCREREADER_VIEW_MODE == "scroll" and self.SCROLL_VIEW_MODE or self.PAGE_VIEW_MODE
+    self._view_mode = G_defaults:readSetting("DCREREADER_VIEW_MODE") == "scroll" and self.SCROLL_VIEW_MODE or self.PAGE_VIEW_MODE
 
     local ok
     ok, self._document = pcall(cre.newDocView, CanvasContext:getWidth(), CanvasContext:getHeight(), self._view_mode)
@@ -290,7 +296,7 @@ function CreDocument:render()
     -- This is now configurable and done by ReaderRolling:
     -- -- set visible page count in landscape
     -- if math.max(CanvasContext:getWidth(), CanvasContext:getHeight()) / CanvasContext:getDPI()
-    --     < DCREREADER_TWO_PAGE_THRESHOLD then
+    --     < G_defaults:readSetting("DCREREADER_TWO_PAGE_THRESHOLD") then
     --     self:setVisiblePageCount(1)
     -- end
     logger.dbg("CreDocument: rendering document...")
@@ -328,9 +334,11 @@ function CreDocument:close()
         end
 
         -- Only exists if the call cache is enabled
+        --[[
         if self._callCacheDestroy then
             self._callCacheDestroy()
         end
+        --]]
     end
 end
 
@@ -539,13 +547,39 @@ function CreDocument:getCoverPageImage()
     end
 end
 
-function CreDocument:getImageFromPosition(pos, want_frames)
-    local data, size = self._document:getImageDataFromPosition(pos.x, pos.y)
+function CreDocument:getImageFromPosition(pos, want_frames, accept_cre_scalable_image)
+    local data, size, cre_img = self._document:getImageDataFromPosition(pos.x, pos.y, accept_cre_scalable_image)
     if data and size then
         logger.dbg("CreDocument: got image data from position", data, size)
         local image = RenderImage:renderImageData(data, size, want_frames)
         C.free(data) -- free the userdata we got from crengine
         return image
+    end
+    if cre_img then
+        -- The image is a scalable image (SVG), and we got an image object from crengine, that
+        -- can draw itself at any requested scale factor: returns a function, that will be used
+        -- by ImageViewer to get the perfect bb.
+        return function(scale, w, h)
+            logger.dbg("CreImage: scaling for", scale, w, h)
+            if not cre_img then
+                return
+            end
+            if scale == false then -- used to signal we are done with the object
+                cre_img:free()
+                cre_img = false
+                return
+            end
+            -- scale will be used if non-0, otherwise the bb will be made to fit in w/h,
+            -- keeping the original aspect ratio
+            local image_data, image_w, image_h, image_scale = cre_img:renderScaled(scale, w, h)
+            if image_data then
+                -- This data is held in the cre_img object, so this bb is only
+                -- valid as long as this object is alive, and until the next
+                -- call to this function that will replace this data.
+                local bb = Blitbuffer.new(image_w, image_h, Blitbuffer.TYPE_BBRGB32, image_data)
+                return bb, image_scale
+            end
+        end
     end
 end
 
@@ -680,6 +714,28 @@ end
 
 function CreDocument:getNextVisibleChar(xp)
     return self._document:getNextVisibleChar(xp)
+end
+
+function CreDocument:getSelectedWordContext(word, nb_words, pos0, pos1)
+    local pos_start = pos0
+    local pos_end = pos1
+
+    for i=0, nb_words do
+        local start = self:getPrevVisibleWordStart(pos_start)
+        if start then pos_start = start
+        else break end
+    end
+
+    for i=0, nb_words do
+        local ending = self:getNextVisibleWordEnd(pos_end)
+        if ending then pos_end = ending
+        else break end
+    end
+
+    local prev = self:getTextFromXPointers(pos_start, pos0)
+    local next = self:getTextFromXPointers(pos1, pos_end)
+
+    return prev, next
 end
 
 function CreDocument:drawCurrentView(target, x, y, rect, pos)
@@ -988,6 +1044,28 @@ function CreDocument:setupFallbackFontFaces()
     local s_fallbacks = table.concat(fallbacks, "|")
     logger.dbg("CreDocument: set fallback font faces:", s_fallbacks)
     self._document:setStringProperty("crengine.font.fallback.faces", s_fallbacks)
+end
+
+function CreDocument:setFontFamilyFontFaces(font_family_fonts, ignore_font_names)
+    if not font_family_fonts then
+        font_family_fonts = {}
+    end
+    -- crengine expects font names concatenated in the order they appear in the
+    -- enum css_font_family_t (include/cssdef.h) (with css_ff_inherit ignored,
+    -- the first slot carries ignore_font_names if not empty
+    local fonts = {}
+    table.insert(fonts, ignore_font_names and "not-empty" or "")
+    table.insert(fonts, font_family_fonts["serif"] or "")
+    table.insert(fonts, font_family_fonts["sans-serif"] or "")
+    table.insert(fonts, font_family_fonts["cursive"] or "")
+    table.insert(fonts, font_family_fonts["fantasy"] or "")
+    table.insert(fonts, font_family_fonts["monospace"] or "")
+    table.insert(fonts, font_family_fonts["math"] or "")
+    table.insert(fonts, font_family_fonts["emoji"] or "")
+    table.insert(fonts, font_family_fonts["fangsong"] or "")
+    local s_font_family_faces = table.concat(fonts, "|")
+    logger.dbg("CreDocument: set font-family font faces:", s_font_family_faces)
+    self._document:setStringProperty("crengine.font.family.faces", s_font_family_faces)
 end
 
 -- To use the new crengine language typography facilities (hyphenation, line breaking,
@@ -1402,6 +1480,7 @@ function CreDocument:register(registry)
     registry:addProvider("prc", "application/vnd.palm", self)
     registry:addProvider("rtf", "application/rtf", self, 90)
     registry:addProvider("rtf.zip", "application/rtf+zip", self, 90) -- Alternative mimetype for OPDS.
+    registry:addProvider("svg", "image/svg+xml", self, 90)
     registry:addProvider("tcr", "application/tcr", self)
     registry:addProvider("txt", "text/plain", self, 90)
     registry:addProvider("txt.zip", "application/zip", self, 90)
@@ -1458,14 +1537,27 @@ function CreDocument:setupCallCache()
         -- Stores the key for said current tag
         self._current_call_cache_tag = nil
     end
+    --[[
+    --- @note: If explicitly destroying the references to the caches is necessary to get their content collected by the GC,
+    ---        then you have a ref leak to this Document instance somewhere,
+    ---        c.f., https://github.com/koreader/koreader/pull/7634#discussion_r627820424
+    ---        Keep in mind that a *lot* of ReaderUI modules keep a ref to document, so it may be fairly remote!
+    ---        A good contender for issues like these would be references being stored in the class object instead
+    ---        of in instance objects because of inheritance rules. c.f., https://github.com/koreader/koreader/pull/9586,
+    ---        which got rid of a giant leak of every ReaderUI module via the active_widgets array...
+    ---        A simple testing methodology is to create a dummy buffer alongside self.buffer in drawCurrentView,
+    ---        push it to the global cache via _callCacheSet, and trace the BlitBuffer gc method in ffi/blitbuffer.lua.
+    ---        You'll probably want to stick a pair of collectgarbage() calls somewhere in the UI loop
+    ---        (e.g., at the coda of UIManager:close) to trip a GC pass earlier than the one in DocumentRegistry:openDocument.
+    ---        (Keep in mind that, in UIManager:close, widget is still in scope inside the function,
+    ---        so you'll have to close another widget to truly collect it (here, ReaderUI)).
     self._callCacheDestroy = function()
-        --- @note: Explicitly destroying the references to the caches is apparently necessary to get their content collected by the GC...
-        ---        c.f., https://github.com/koreader/koreader/pull/7634#discussion_r627820424
         self._global_call_cache = nil
         self._tag_list_call_cache = nil
         self._tag_call_cache = nil
         self._current_call_cache_tag = nil
     end
+    --]]
     -- global cache
     self._callCacheGet = function(key)
         return self._global_call_cache[key]

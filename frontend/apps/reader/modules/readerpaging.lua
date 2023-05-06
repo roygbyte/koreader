@@ -27,87 +27,114 @@ local function copyPageState(page_state)
 end
 
 
-local ReaderPaging = InputContainer:new{
+local ReaderPaging = InputContainer:extend{
     pan_rate = 30,  -- default 30 ops, will be adjusted in readerui
     current_page = 0,
     number_of_pages = 0,
     visible_area = nil,
     page_area = nil,
-    overlap = Screen:scaleBySize(DOVERLAPPIXELS),
+    overlap = Screen:scaleBySize(G_defaults:readSetting("DOVERLAPPIXELS")),
 
     page_flipping_mode = false,
     bookmark_flipping_mode = false,
-    flip_steps = {0,1,2,5,10,20,50,100},
+    flip_steps = {0, 1, 2, 5, 10, 20, 50, 100},
 }
 
 function ReaderPaging:init()
-    self.key_events = {}
+    self:registerKeyEvents()
+    self.pan_interval = time.s(1 / self.pan_rate)
+    self.number_of_pages = self.ui.document.info.number_of_pages
+
+    -- delegate gesture listener to readerui, NOP our own
+    self.ges_events = nil
+end
+
+function ReaderPaging:onGesture() end
+
+function ReaderPaging:registerKeyEvents()
     if Device:hasKeys() then
         self.key_events.GotoNextPage = {
-            { {"RPgFwd", "LPgFwd", "Right" } }, doc = "go to next page",
-            event = "GotoViewRel", args = 1,
+            { { "RPgFwd", "LPgFwd", not Device:hasFewKeys() and "Right" } },
+            event = "GotoViewRel",
+            args = 1,
         }
         self.key_events.GotoPrevPage = {
-            { { "RPgBack", "LPgBack", "Left" } }, doc = "go to previous page",
-            event = "GotoViewRel", args = -1,
+            { { "RPgBack", "LPgBack", not Device:hasFewKeys() and "Left" } },
+            event = "GotoViewRel",
+            args = -1,
         }
-        if Device:hasFewKeys() then
-            table.remove(self.key_events.GotoNextPage[1][1], 3) -- right
-            table.remove(self.key_events.GotoPrevPage[1][1], 3) -- left
-        end
         self.key_events.GotoNextPos = {
-            { {"Down" } }, doc = "go to next position",
-            event = "GotoPosRel", args = 1,
+            { "Down" },
+            event = "GotoPosRel",
+            args = 1,
         }
         self.key_events.GotoPrevPos = {
-            { { "Up" } }, doc = "go to previous position",
-            event = "GotoPosRel", args = -1,
+            { "Up" },
+            event = "GotoPosRel",
+            args = -1,
         }
-
     end
     if Device:hasKeyboard() then
         self.key_events.GotoFirst = {
-            {"1"}, doc = "go to start", event = "GotoPercent", args = 0,
+            { "1" },
+            event = "GotoPercent",
+            args = 0,
         }
         self.key_events.Goto11 = {
-            {"2"}, doc = "go to 11%", event = "GotoPercent", args = 11,
+            { "2" },
+            event = "GotoPercent",
+            args = 11,
         }
         self.key_events.Goto22 = {
-            {"3"}, doc = "go to 22%", event = "GotoPercent", args = 22,
+            { "3" },
+            event = "GotoPercent",
+            args = 22,
         }
         self.key_events.Goto33 = {
-            {"4"}, doc = "go to 33%", event = "GotoPercent", args = 33,
+            { "4" },
+            event = "GotoPercent",
+            args = 33,
         }
         self.key_events.Goto44 = {
-            {"5"}, doc = "go to 44%", event = "GotoPercent", args = 44,
+            { "5" },
+            event = "GotoPercent",
+            args = 44,
         }
         self.key_events.Goto55 = {
-            {"6"}, doc = "go to 55%", event = "GotoPercent", args = 55,
+            { "6" },
+            event = "GotoPercent",
+            args = 55,
         }
         self.key_events.Goto66 = {
-            {"7"}, doc = "go to 66%", event = "GotoPercent", args = 66,
+            { "7" },
+            event = "GotoPercent",
+            args = 66,
         }
         self.key_events.Goto77 = {
-            {"8"}, doc = "go to 77%", event = "GotoPercent", args = 77,
+            { "8" },
+            event = "GotoPercent",
+            args = 77,
         }
         self.key_events.Goto88 = {
-            {"9"}, doc = "go to 88%", event = "GotoPercent", args = 88,
+            { "9" },
+            event = "GotoPercent",
+            args = 88,
         }
         self.key_events.GotoLast = {
-            {"0"}, doc = "go to end", event = "GotoPercent", args = 100,
+            { "0" },
+            event = "GotoPercent",
+            args = 100,
         }
     end
-    self.pan_interval = time.s(1 / self.pan_rate)
-    self.number_of_pages = self.ui.document.info.number_of_pages
 end
+
+ReaderPaging.onPhysicalKeyboardConnected = ReaderPaging.registerKeyEvents
 
 function ReaderPaging:onReaderReady()
     self:setupTouchZones()
 end
 
 function ReaderPaging:setupTouchZones()
-    self.ges_events = {}
-    self.onGesture = nil
     if not Device:isTouchDevice() then return end
 
     local forward_zone, backward_zone = self.view:getTapZones()
@@ -542,7 +569,7 @@ end
 
 function ReaderPaging:onGotoPercent(percent)
     logger.dbg("goto document offset in percent:", percent)
-    local dest = math.floor(self.number_of_pages * percent / 100)
+    local dest = math.floor(self.number_of_pages * percent * (1/100))
     if dest < 1 then dest = 1 end
     if dest > self.number_of_pages then
         dest = self.number_of_pages
@@ -908,8 +935,8 @@ function ReaderPaging:onGotoPageRel(diff)
     local x_pan_off, y_pan_off = 0, 0
     local right_to_left = self.ui.document.configurable.writing_direction and self.ui.document.configurable.writing_direction > 0
     local bottom_to_top = self.ui.zooming.zoom_bottom_to_top
-    local h_progress = 1 - self.ui.zooming.zoom_overlap_h / 100
-    local v_progress = 1 - self.ui.zooming.zoom_overlap_v / 100
+    local h_progress = 1 - self.ui.zooming.zoom_overlap_h * (1/100)
+    local v_progress = 1 - self.ui.zooming.zoom_overlap_v * (1/100)
     local old_va = self.visible_area
     local old_page = self.current_page
     local x, y, w, h = "x", "y", "w", "h"

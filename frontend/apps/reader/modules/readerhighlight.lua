@@ -1,5 +1,6 @@
 local BD = require("ui/bidi")
 local ButtonDialog = require("ui/widget/buttondialog")
+local ConfirmBox = require("ui/widget/confirmbox")
 local Device = require("device")
 local Event = require("ui/event")
 local Geom = require("ui/geometry")
@@ -20,8 +21,7 @@ local C_ = _.pgettext
 local T = require("ffi/util").template
 local Screen = Device.screen
 
-local ReaderHighlight = InputContainer:new{
-}
+local ReaderHighlight = InputContainer:extend{}
 
 local function inside_box(pos, box)
     if pos then
@@ -53,24 +53,7 @@ function ReaderHighlight:init()
     self._previous_indicator_pos = nil
     self._last_indicator_move_args = {dx = 0, dy = 0, distance = 0, time = time:now()}
 
-    if Device:hasDPad() then
-        -- Used for text selection with dpad/keys
-        local QUICK_INDICTOR_MOVE = true
-        self.key_events.StopHighlightIndicator = { {Device.input.group.Back}, doc = "Stop non-touch highlight", args = true } -- true: clear highlight selection
-        self.key_events.UpHighlightIndicator = { {"Up"}, doc = "move indicator up", event = "MoveHighlightIndicator", args = {0, -1} }
-        self.key_events.DownHighlightIndicator = { {"Down"}, doc = "move indicator down", event = "MoveHighlightIndicator", args = {0, 1} }
-        -- let FewKeys device can move indicator left
-        self.key_events.LeftHighlightIndicator = { {"Left"}, doc = "move indicator left", event = "MoveHighlightIndicator", args = {-1, 0} }
-        self.key_events.RightHighlightIndicator = { {"Right"}, doc = "move indicator right", event = "MoveHighlightIndicator", args = {1, 0} }
-        self.key_events.HighlightPress = { {"Press"}, doc = "highlight start or end" }
-        if Device:hasKeys() then
-            self.key_events.QuickUpHighlightIndicator = { {"Shift", "Up"}, doc = "quick move indicator up", event = "MoveHighlightIndicator", args = {0, -1, QUICK_INDICTOR_MOVE} }
-            self.key_events.QuickDownHighlightIndicator = { {"Shift", "Down"}, doc = "quick move indicator down", event = "MoveHighlightIndicator", args = {0, 1, QUICK_INDICTOR_MOVE} }
-            self.key_events.QuickLeftHighlightIndicator = { {"Shift", "Left"}, doc = "quick move indicator left", event = "MoveHighlightIndicator", args = {-1, 0, QUICK_INDICTOR_MOVE} }
-            self.key_events.QuickRightHighlightIndicator = { {"Shift", "Right"}, doc = "quick move indicator right", event = "MoveHighlightIndicator", args = {1, 0, QUICK_INDICTOR_MOVE} }
-            self.key_events.StartHighlightIndicator = { {"H"}, doc = "start non-touch highlight" }
-        end
-    end
+    self:registerKeyEvents()
 
     self._highlight_buttons = {
         -- highlight and add_note are for the document itself,
@@ -110,7 +93,7 @@ function ReaderHighlight:init()
         end,
         ["04_add_note"] = function(this)
             return {
-                text = _("Add Note"),
+                text = _("Add note"),
                 callback = function()
                     this:addNote()
                     this:onClose()
@@ -231,19 +214,61 @@ function ReaderHighlight:init()
     self.ui:registerPostInitCallback(function()
         self.ui.menu:registerToMainMenu(self)
     end)
+
+    -- delegate gesture listener to readerui, NOP our own
+    self.ges_events = nil
 end
 
-function ReaderHighlight:setupTouchZones()
-    -- deligate gesture listener to readerui
-    self.ges_events = {}
-    self.onGesture = nil
+function ReaderHighlight:onGesture() end
 
+function ReaderHighlight:registerKeyEvents()
+    if Device:hasKeys() then
+        -- Used for text selection with dpad/keys
+        local QUICK_INDICATOR_MOVE = true
+        self.key_events.QuickUpHighlightIndicator    = { { "Shift", "Up" },    event = "MoveHighlightIndicator", args = {0, -1, QUICK_INDICATOR_MOVE} }
+        self.key_events.QuickDownHighlightIndicator  = { { "Shift", "Down" },  event = "MoveHighlightIndicator", args = {0, 1, QUICK_INDICATOR_MOVE} }
+        self.key_events.QuickLeftHighlightIndicator  = { { "Shift", "Left" },  event = "MoveHighlightIndicator", args = {-1, 0, QUICK_INDICATOR_MOVE} }
+        self.key_events.QuickRightHighlightIndicator = { { "Shift", "Right" }, event = "MoveHighlightIndicator", args = {1, 0, QUICK_INDICATOR_MOVE} }
+        self.key_events.StartHighlightIndicator      = { { "H" } }
+        if Device:hasDPad() then
+            self.key_events.StopHighlightIndicator  = { { Device.input.group.Back }, args = true } -- true: clear highlight selection
+            self.key_events.UpHighlightIndicator    = { { "Up" },    event = "MoveHighlightIndicator", args = {0, -1} }
+            self.key_events.DownHighlightIndicator  = { { "Down" },  event = "MoveHighlightIndicator", args = {0, 1} }
+            -- let hasFewKeys device move the indicator left
+            self.key_events.LeftHighlightIndicator  = { { "Left" },  event = "MoveHighlightIndicator", args = {-1, 0} }
+            self.key_events.RightHighlightIndicator = { { "Right" }, event = "MoveHighlightIndicator", args = {1, 0} }
+            self.key_events.HighlightPress          = { { "Press" } }
+        end
+    end
+end
+
+ReaderHighlight.onPhysicalKeyboardConnected = ReaderHighlight.registerKeyEvents
+
+function ReaderHighlight:setupTouchZones()
     if not Device:isTouchDevice() then return end
     local hold_pan_rate = G_reader_settings:readSetting("hold_pan_rate")
     if not hold_pan_rate then
         hold_pan_rate = Screen.low_pan_rate and 5.0 or 30.0
     end
+    local DTAP_ZONE_TOP_LEFT = G_defaults:readSetting("DTAP_ZONE_TOP_LEFT")
     self.ui:registerTouchZones({
+        {
+            id = "readerhighlight_tap_select_mode",
+            ges = "tap",
+            screen_zone = {
+                ratio_x = DTAP_ZONE_TOP_LEFT.x, ratio_y = DTAP_ZONE_TOP_LEFT.y,
+                ratio_w = DTAP_ZONE_TOP_LEFT.w, ratio_h = DTAP_ZONE_TOP_LEFT.h,
+            },
+            overrides = {
+                "readerhighlight_tap",
+                "tap_top_left_corner",
+                "readermenu_ext_tap",
+                "readermenu_tap",
+                "tap_forward",
+                "tap_backward",
+            },
+            handler = function(ges) return self:onTapSelectModeIcon() end
+        },
         {
             id = "readerhighlight_tap",
             ges = "tap",
@@ -319,6 +344,7 @@ local long_press_action = {
     {_("Do nothing"), "nothing"},
     {_("Highlight"), "highlight"},
     {_("Select and highlight"), "select"},
+    {_("Add note"), "note"},
     {_("Translate"), "translate"},
     {_("Wikipedia"), "wikipedia"},
     {_("Dictionary"), "dictionary"},
@@ -446,37 +472,6 @@ function ReaderHighlight:addToMainMenu(menu_items)
         text = _("Long-press on text"),
         sub_item_table = {
             {
-                text_func = function()
-                    return T(_("Highlight long-press interval: %1 s"),
-                        G_reader_settings:readSetting("highlight_long_hold_threshold_s", 3))
-                end,
-                keep_menu_open = true,
-                callback = function(touchmenu_instance)
-                    local SpinWidget = require("ui/widget/spinwidget")
-                    local items = SpinWidget:new{
-                        title_text = _("Highlight long-press interval"),
-                        info_text = _([[
-If a touch is not released in this interval, it is considered a long-press. On document text, single word selection will not be triggered.
-
-The interval value is in seconds and can range from 3 to 20 seconds.]]),
-                        width = math.floor(Screen:getWidth() * 0.75),
-                        value = G_reader_settings:readSetting("highlight_long_hold_threshold_s", 3),
-                        value_min = 3,
-                        value_max = 20,
-                        value_step = 1,
-                        value_hold_step = 5,
-                        unit = C_("Time", "s"),
-                        ok_text = _("Set interval"),
-                        default_value = 3,
-                        callback = function(spin)
-                            G_reader_settings:saveSetting("highlight_long_hold_threshold_s", spin.value)
-                            if touchmenu_instance then touchmenu_instance:updateItems() end
-                        end
-                    }
-                    UIManager:show(items)
-                end,
-            },
-            {
                 text = _("Dictionary on single word selection"),
                 checked_func = function()
                     return not self.view.highlight.disabled and G_reader_settings:nilOrFalse("highlight_action_on_single_word")
@@ -491,7 +486,7 @@ The interval value is in seconds and can range from 3 to 20 seconds.]]),
             },
         },
     }
-    for _, v in ipairs(long_press_action) do
+    for i, v in ipairs(long_press_action) do
         table.insert(menu_items.long_press.sub_item_table, {
             text = v[1],
             checked_func = function()
@@ -499,11 +494,39 @@ The interval value is in seconds and can range from 3 to 20 seconds.]]),
             end,
             radio = true,
             callback = function()
-                G_reader_settings:saveSetting("default_highlight_action", v[2])
-                self.view.highlight.disabled = v[2] == "nothing"
+                self:onSetHighlightAction(i, true) -- no notification
             end,
         })
     end
+    table.insert(menu_items.long_press.sub_item_table, {
+        text_func = function()
+            return T(_("Highlight very-long-press interval: %1 s"),
+                G_reader_settings:readSetting("highlight_long_hold_threshold_s", 3))
+        end,
+        keep_menu_open = true,
+        callback = function(touchmenu_instance)
+            local SpinWidget = require("ui/widget/spinwidget")
+            local items = SpinWidget:new{
+                title_text = _("Highlight very-long-press interval"),
+                info_text = _("If a long-press is not released in this interval, it is considered a very-long-press. On document text, single word selection will not be triggered."),
+                width = math.floor(Screen:getWidth() * 0.75),
+                value = G_reader_settings:readSetting("highlight_long_hold_threshold_s", 3),
+                value_min = 2.5,
+                value_max = 20,
+                value_step = 0.1,
+                value_hold_step = 0.5,
+                unit = C_("Time", "s"),
+                precision = "%0.1f",
+                ok_text = _("Set interval"),
+                default_value = 3,
+                callback = function(spin)
+                    G_reader_settings:saveSetting("highlight_long_hold_threshold_s", spin.value)
+                    if touchmenu_instance then touchmenu_instance:updateItems() end
+                end
+            }
+            UIManager:show(items)
+        end,
+    })
     -- long_press menu is under taps_and_gestures menu which is not available for non touch device
     -- Clone long_press menu and change label making much meaning for non touch devices
     if not Device:isTouchDevice() and Device:hasDPad() then
@@ -567,7 +590,7 @@ function ReaderHighlight:clear(clear_id)
         -- might happen if scheduled and run after document is closed
         return
     end
-    if self.ui.document.info.has_pages then
+    if self.ui.paging then
         self.view.highlight.temp = {}
     else
         self.ui.document:clearSelection()
@@ -591,6 +614,21 @@ function ReaderHighlight:onClearHighlight()
     return true
 end
 
+function ReaderHighlight:onTapSelectModeIcon()
+    if not self.select_mode then return end
+    UIManager:show(ConfirmBox:new{
+        text = _("You are currently in SELECT mode.\nTo finish highlighting, long press where the highlight should end and press the HIGHLIGHT button.\nYou can also exit select mode by tapping on the start of the highlight."),
+        icon = "format-quote-close",
+        ok_text = _("Exit select mode"),
+        cancel_text = _("Close"),
+        ok_callback = function()
+            self.select_mode = false
+            self:deleteHighlight(self.highlight_page, self.highlight_idx)
+        end
+    })
+    return true
+end
+
 function ReaderHighlight:onTap(_, ges)
     -- We only actually need to clear if we have something to clear in the first place.
     -- (We mainly want to avoid CRe's clearSelection,
@@ -598,8 +636,8 @@ function ReaderHighlight:onTap(_, ges)
     -- ReaderHighlight:clear can only return true if self.hold_pos was set anyway.
     local cleared = self.hold_pos and self:clear()
     -- We only care about potential taps on existing highlights, not on taps that closed a highlight menu.
-    if not cleared and ges and not self.select_mode then
-        if self.ui.document.info.has_pages then
+    if not cleared and ges then
+        if self.ui.paging then
             return self:onTapPageSavedHighlight(ges)
         else
             return self:onTapXPointerSavedHighlight(ges)
@@ -610,17 +648,22 @@ end
 function ReaderHighlight:onTapPageSavedHighlight(ges)
     local pages = self.view:getCurrentPageList()
     local pos = self.view:screenToPageTransform(ges.pos)
-    for key, page in pairs(pages) do
-        local items = self.view.highlight.saved[page]
+    for _, page in ipairs(pages) do
+        local items = self.view:getPageSavedHighlights(page)
         if items then
-            for i = 1, #items do
-                local pos0, pos1 = items[i].pos0, items[i].pos1
-                local boxes = self.ui.document:getPageBoxesFromPositions(page, pos0, pos1)
+            for i, item in ipairs(items) do
+                local boxes = self.ui.document:getPageBoxesFromPositions(page, item.pos0, item.pos1)
                 if boxes then
-                    for index, box in pairs(boxes) do
+                    for _, box in ipairs(boxes) do
                         if inside_box(pos, box) then
                             logger.dbg("Tap on highlight")
-                            return self:onShowHighlightNoteOrDialog(page, i)
+                            local hl_page, hl_i
+                            if item.parent then -- multi-page highlight
+                                hl_page, hl_i = unpack(item.parent)
+                            else
+                                hl_page, hl_i = page, i
+                            end
+                            return self:onShowHighlightNoteOrDialog(hl_page, hl_i)
                         end
                     end
                 end
@@ -682,10 +725,7 @@ function ReaderHighlight:onTapXPointerSavedHighlight(ges)
 end
 
 function ReaderHighlight:updateHighlight(page, index, side, direction, move_by_char)
-    if self.ui.document.info.has_pages then -- we do this only if it's epub file
-        return
-    end
-
+    if self.ui.paging then return end
     local highlight = self.view.highlight.saved[page][index]
     local highlight_time = highlight.datetime
     local highlight_beginning = highlight.pos0
@@ -770,11 +810,15 @@ function ReaderHighlight:updateHighlight(page, index, side, direction, move_by_c
 end
 
 function ReaderHighlight:onShowHighlightNoteOrDialog(page, index)
+    if self.select_mode then
+        if page ~= self.highlight_page or index ~= self.highlight_idx then return end
+        -- tap on the first fragment: abort select mode, clear highlight
+        self.select_mode = false
+        self:deleteHighlight(page, index)
+        return true
+    end
     local item = self.view.highlight.saved[page][index]
-    local bookmark_note = self.ui.bookmark:getBookmarkNote({
-        page = self.ui.document.info.has_pages and item.pos0.page or item.pos0,
-        datetime = item.datetime,
-    })
+    local bookmark_note = self.ui.bookmark:getBookmarkNote({datetime = item.datetime})
     if bookmark_note then
         local textviewer
         textviewer = TextViewer:new{
@@ -815,8 +859,7 @@ function ReaderHighlight:onShowHighlightDialog(page, index, is_auto_text)
                 text = _("Delete"),
                 callback = function()
                     self:deleteHighlight(page, index)
-                    -- other part outside of the dialog may be dirty
-                    UIManager:close(self.edit_highlight_dialog, "ui")
+                    UIManager:close(self.edit_highlight_dialog)
                     self.edit_highlight_dialog = nil
                 end,
             },
@@ -941,7 +984,9 @@ function ReaderHighlight:onShowHighlightMenu(page, index)
         buttons = highlight_buttons,
         tap_close_callback = function() self:handleEvent(Event:new("Tap")) end,
     }
-    UIManager:show(self.highlight_dialog)
+    -- NOTE: Disable merging for this update,
+    --       or the buggy Sage kernel may alpha-blend it into the page (with a bogus alpha value, to boot)...
+    UIManager:show(self.highlight_dialog, "[ui]")
 end
 dbg:guard(ReaderHighlight, "onShowHighlightMenu",
     function(self)
@@ -1008,7 +1053,9 @@ function ReaderHighlight:onHold(arg, ges)
     -- check if we were holding on an image
     -- we provide want_frames=true, so we get a list of images for
     -- animated GIFs (supported by ImageViewer)
-    local image = self.ui.document:getImageFromPosition(self.hold_pos, true)
+    -- We provide accept_cre_scalable_image=true to get, if the image is a SVG image,
+    -- a function that ImageViewer can use to get a perfect bb at any scale factor.
+    local image = self.ui.document:getImageFromPosition(self.hold_pos, true, true)
     if image then
         logger.dbg("hold on image")
         local ImageViewer = require("ui/widget/imageviewer")
@@ -1058,7 +1105,7 @@ function ReaderHighlight:onHold(arg, ges)
             end
         end
 
-        if self.ui.document.info.has_pages then
+        if self.ui.paging then
             self.view.highlight.temp[self.hold_pos.page] = self.selected_text.sboxes
             -- Unfortunately, getWordFromPosition() may not return good coordinates,
             -- so refresh the whole page
@@ -1279,32 +1326,16 @@ dbg:guard(ReaderHighlight, "lookup",
     end)
 
 function ReaderHighlight:getSelectedWordContext(nb_words)
-    if not self.ui.rolling or not self.selected_text then return nil end
-    local pos_start = self.selected_text.pos0
-    local pos_end = self.selected_text.pos1
-
-    for i=0, nb_words do
-        local ok, start = pcall(self.ui.document.getPrevVisibleWordStart, self.ui.document, pos_start)
-        if ok then pos_start = start
-        else break end
+    if not self.selected_text then return end
+    local ok, prev_context, next_context = pcall(self.ui.document.getSelectedWordContext, self.ui.document,
+                                                 self.selected_text.text, nb_words, self.selected_text.pos0, self.selected_text.pos1)
+    if ok then
+        return prev_context, next_context
     end
-
-    for i=0, nb_words do
-        local ok, ending = pcall(self.ui.document.getNextVisibleWordEnd, self.ui.document, pos_end)
-        if ok then pos_end = ending
-        else break end
-    end
-
-    local ok_prev, prev = pcall(self.ui.document.getTextFromXPointers, self.ui.document, pos_start, self.selected_text.pos0)
-    local ok_next, next = pcall(self.ui.document.getTextFromXPointers, self.ui.document, self.selected_text.pos1, pos_end)
-
-    return ok_prev and prev, ok_next and next
 end
 
 function ReaderHighlight:viewSelectionHTML(debug_view, no_css_files_buttons)
-    if self.ui.document.info.has_pages then
-        return
-    end
+    if self.ui.paging then return end
     if self.selected_text and self.selected_text.pos0 and self.selected_text.pos1 then
         -- For available flags, see the "#define WRITENODEEX_*" in crengine/src/lvtinydom.cpp
         -- Start with valid and classic displayed HTML (with only block nodes indented),
@@ -1364,6 +1395,7 @@ function ReaderHighlight:viewSelectionHTML(debug_view, no_css_files_buttons)
                                 justified = false,
                                 para_direction_rtl = false,
                                 auto_para_direction = false,
+                                add_default_buttons = true,
                                 buttons_table = {
                                     {{
                                         text = _("Prettify"),
@@ -1380,19 +1412,13 @@ function ReaderHighlight:viewSelectionHTML(debug_view, no_css_files_buttons)
                                             })
                                         end,
                                     }},
-                                    {{
-                                        text = _("Close"),
-                                        callback = function()
-                                            UIManager:close(cssviewer)
-                                        end,
-                                    }},
                                 }
                             }
                             UIManager:show(cssviewer)
                         end,
                         hold_callback = buttons_hold_callback,
                     }
-                    -- One button per row, too make room for the possibly long css filename
+                    -- One button per row, to make room for the possibly long css filename
                     table.insert(buttons_table, {button})
                 end
             end
@@ -1416,13 +1442,6 @@ function ReaderHighlight:viewSelectionHTML(debug_view, no_css_files_buttons)
                 end,
                 hold_callback = buttons_hold_callback,
             }})
-            table.insert(buttons_table, {{
-                text = _("Close"),
-                callback = function()
-                    UIManager:close(textviewer)
-                end,
-                hold_callback = buttons_hold_callback,
-            }})
             textviewer = TextViewer:new{
                 title = _("Selection HTML"),
                 text = html,
@@ -1430,6 +1449,8 @@ function ReaderHighlight:viewSelectionHTML(debug_view, no_css_files_buttons)
                 justified = false,
                 para_direction_rtl = false,
                 auto_para_direction = false,
+                add_default_buttons = true,
+                default_hold_callback = buttons_hold_callback,
                 buttons_table = buttons_table,
             }
             UIManager:show(textviewer)
@@ -1488,20 +1509,13 @@ function ReaderHighlight:onHoldRelease()
 
     if self.select_mode then -- extended highlighting, ending fragment
         if self.selected_text then
-            if self.ui.document.info.has_pages and self.ui.paging.current_page ~= self.highlight_page then
-                self.ui.paging:_gotoPage(self.highlight_page)
-                UIManager:show(Notification:new{
-                    text = _("Fragments must be within one page"),
-                })
+            self.select_mode = false
+            self:extendSelection()
+            if default_highlight_action == "select" then
+                self:saveHighlight(true)
+                self:clear()
             else
-                self.select_mode = false
-                self:extendSelection()
-                if default_highlight_action == "select" then
-                    self:saveHighlight(true)
-                    self:clear()
-                else
-                    self:onShowHighlightMenu()
-                end
+                self:onShowHighlightMenu()
             end
         end
         return true
@@ -1536,6 +1550,9 @@ function ReaderHighlight:onHoldRelease()
             elseif default_highlight_action == "select" then
                 self:startSelection()
                 self:onClose()
+            elseif default_highlight_action == "note" then
+                self:addNote()
+                self:onClose()
             elseif default_highlight_action == "translate" then
                 self:translate(self.selected_text)
             elseif default_highlight_action == "wikipedia" then
@@ -1554,6 +1571,27 @@ function ReaderHighlight:onHoldRelease()
     return true
 end
 
+function ReaderHighlight:getHighlightActions() -- for Dispatcher
+    local action_nums, action_texts = {}, {}
+    for i, v in ipairs(long_press_action) do
+        table.insert(action_nums, i)
+        table.insert(action_texts, v[1])
+    end
+    return action_nums, action_texts
+end
+
+function ReaderHighlight:onSetHighlightAction(action_num, no_notification)
+    local v = long_press_action[action_num]
+    G_reader_settings:saveSetting("default_highlight_action", v[2])
+    self.view.highlight.disabled = v[2] == "nothing"
+    if not no_notification then -- fired with a gesture
+        UIManager:show(Notification:new{
+            text = T(_("Default highlight action changed to '%1'."), v[1]),
+        })
+    end
+    return true
+end
+
 function ReaderHighlight:onCycleHighlightAction()
     local current_action = G_reader_settings:readSetting("default_highlight_action", "ask")
     local next_action_num
@@ -1566,10 +1604,7 @@ function ReaderHighlight:onCycleHighlightAction()
     if next_action_num > #long_press_action then
         next_action_num = 1
     end
-    G_reader_settings:saveSetting("default_highlight_action", long_press_action[next_action_num][2])
-    UIManager:show(Notification:new{
-        text = T(_("Default highlight action changed to '%1'."), long_press_action[next_action_num][1]),
-    })
+    self:onSetHighlightAction(next_action_num)
     return true
 end
 
@@ -1630,7 +1665,7 @@ function ReaderHighlight:onUnhighlight(bookmark_item)
         sel_text = cleanupSelectedText(self.selected_text.text)
         sel_pos0 = self.selected_text.pos0
     end
-    if self.ui.document.info.has_pages then -- We can safely use page
+    if self.ui.paging then -- We can safely use page
         -- As we may have changed spaces and hyphens handling in the extracted
         -- text over the years, check text identities with them removed
         local sel_text_cleaned = sel_text:gsub("[ -]", ""):gsub("\xC2\xAD", "")
@@ -1668,16 +1703,11 @@ function ReaderHighlight:onUnhighlight(bookmark_item)
             end
         end
     end
-    if bookmark_item and not idx then
-        logger.warn("unhighlight: bookmark_item not found among highlights", bookmark_item)
-        -- Remove it from bookmarks anyway, so we're not stuck with an
-        -- unremovable bookmark
-        self.ui.bookmark:removeBookmark(bookmark_item)
-        return
+    if idx then
+        logger.dbg("found highlight to delete on page", page, idx)
+        self:deleteHighlight(page, idx, bookmark_item)
+        return true
     end
-    logger.dbg("found highlight to delete on page", page, idx)
-    self:deleteHighlight(page, idx, bookmark_item)
-    return true
 end
 
 function ReaderHighlight:getHighlightBookmarkItem()
@@ -1686,7 +1716,7 @@ function ReaderHighlight:getHighlightBookmarkItem()
     end
     if self.selected_text and self.selected_text.pos0 and self.selected_text.pos1 then
         return {
-            page = self.ui.paging and self.hold_pos.page or self.selected_text.pos0,
+            page = self.ui.paging and self.selected_text.pos0.page or self.selected_text.pos0,
             pos0 = self.selected_text.pos0,
             pos1 = self.selected_text.pos1,
             notes = cleanupSelectedText(self.selected_text.text),
@@ -1698,14 +1728,14 @@ end
 function ReaderHighlight:saveHighlight(extend_to_sentence)
     self.ui:handleEvent(Event:new("AddHighlight"))
     logger.dbg("save highlight")
-    if self.hold_pos and self.selected_text and self.selected_text.pos0 and self.selected_text.pos1 then
+    if self.selected_text and self.selected_text.pos0 and self.selected_text.pos1 then
         if extend_to_sentence and self.ui.rolling then
             local extended_text = self.ui.document:extendXPointersToSentenceSegment(self.selected_text.pos0, self.selected_text.pos1)
             if extended_text then
                 self.selected_text = extended_text
             end
         end
-        local page = self.hold_pos.page
+        local page = self.ui.paging and self.selected_text.pos0.page or self.ui.document:getPageFromXPointer(self.selected_text.pos0)
         if not self.view.highlight.saved[page] then
             self.view.highlight.saved[page] = {}
         end
@@ -1718,6 +1748,7 @@ function ReaderHighlight:saveHighlight(extend_to_sentence)
             pos0 = self.selected_text.pos0,
             pos1 = self.selected_text.pos1,
             pboxes = self.selected_text.pboxes,
+            ext = self.selected_text.ext,
             drawer = self.view.highlight.saved_drawer,
             chapter = chapter_name,
         }
@@ -1728,18 +1759,52 @@ function ReaderHighlight:saveHighlight(extend_to_sentence)
             bookmark_item.chapter = chapter_name
             self.ui.bookmark:addBookmark(bookmark_item)
         end
-        if self.selected_text.pboxes then
-            self:exportToDocument(page, hl_item)
-        end
+        self:writePdfAnnotation("save", page, hl_item)
         return page, #self.view.highlight.saved[page]
     end
 end
 
-function ReaderHighlight:exportToDocument(page, item)
-    local setting = G_reader_settings:readSetting("save_document")
-    if setting == "disable" then return end
-    logger.dbg("export highlight to document", item)
-    local can_write = self.ui.document:saveHighlight(page, item)
+function ReaderHighlight:writePdfAnnotation(action, page, item, content)
+    if self.ui.rolling or G_reader_settings:readSetting("save_document") == "disable" then
+        return
+    end
+    logger.dbg("write to pdf document", action, item)
+    local function doAction(action_, page_, item_, content_)
+        if action_ == "save" then
+            return self.ui.document:saveHighlight(page_, item_)
+        elseif action_ == "delete" then
+            return self.ui.document:deleteHighlight(page_, item_)
+        elseif action_ == "content" then
+            return self.ui.document:updateHighlightContents(page_, item_, content_)
+        end
+    end
+    local can_write
+    if item.pos0.page == item.pos1.page then -- single-page highlight
+        local item_
+        if item.pboxes then
+            item_ = item
+        else -- called from bookmarks to write bookmark note to annotation
+            for _, hl in ipairs(self.view.highlight.saved[page]) do
+                if hl.datetime == item.datetime then
+                    item_ = {pboxes = hl.pboxes}
+                    break
+                end
+            end
+        end
+        can_write = doAction(action, page, item_, content)
+    else -- multi-page highlight
+        local is_reflow = self.ui.document.configurable.text_wrap
+        for hl_page = item.pos0.page, item.pos1.page do
+            self.ui.document.configurable.text_wrap = 0
+            local hl_part = self:getSavedExtendedHighlightPage(item, hl_page)
+            self.ui.document.configurable.text_wrap = is_reflow
+            can_write = doAction(action, hl_page, hl_part, content)
+            if can_write == false then break end
+            if action == "save" then -- update pboxes from quadpoints
+                item.ext[hl_page].pboxes = hl_part.pboxes
+            end
+        end
+    end
     if can_write == false and not self.warned_once then
         self.warned_once = true
         UIManager:show(InfoMessage:new{
@@ -1758,7 +1823,6 @@ function ReaderHighlight:addNote(text)
     self:editHighlight(page, index, true, text)
     UIManager:close(self.edit_highlight_dialog)
     self.edit_highlight_dialog = nil
-    self.ui:handleEvent(Event:new("AddNote"))
 end
 
 function ReaderHighlight:lookupWikipedia()
@@ -1790,7 +1854,6 @@ function ReaderHighlight:onHighlightDictLookup()
 end
 
 function ReaderHighlight:deleteHighlight(page, i, bookmark_item)
-    self.ui:handleEvent(Event:new("DelHighlight"))
     logger.dbg("delete highlight", page, i)
     -- The per-page table is a pure array
     local removed = table.remove(self.view.highlight.saved[page], i)
@@ -1802,30 +1865,24 @@ function ReaderHighlight:deleteHighlight(page, i, bookmark_item)
         self.ui.bookmark:removeBookmark(bookmark_item)
     else
         self.ui.bookmark:removeBookmark({
-            page = self.ui.document.info.has_pages and page or removed.pos0,
+            page = self.ui.paging and page or removed.pos0,
             datetime = removed.datetime,
         })
     end
-    local setting = G_reader_settings:readSetting("save_document")
-    if setting ~= "disable" then
-        logger.dbg("delete highlight from document", removed)
-        self.ui.document:deleteHighlight(page, removed)
-    end
+    self:writePdfAnnotation("delete", page, removed)
     UIManager:setDirty(self.dialog, "ui")
 end
 
 function ReaderHighlight:editHighlight(page, i, is_new_note, text)
     local item = self.view.highlight.saved[page][i]
-    self.ui.bookmark:renameBookmark({
-        page = self.ui.document.info.has_pages and page or item.pos0,
+    self.ui.bookmark:setBookmarkNote({
+        page = self.ui.paging and page or item.pos0,
         datetime = item.datetime,
-        pboxes = item.pboxes
     }, true, is_new_note, text)
 end
 
 function ReaderHighlight:editHighlightStyle(page, i)
     local item = self.view.highlight.saved[page][i]
-    local save_document = self.ui.paging and G_reader_settings:readSetting("save_document") ~= "disable"
     local radio_buttons = {}
     for _, v in ipairs(highlight_style) do
         table.insert(radio_buttons, {
@@ -1844,12 +1901,12 @@ function ReaderHighlight:editHighlightStyle(page, i)
         default_provider = self.view.highlight.saved_drawer or
             G_reader_settings:readSetting("highlight_drawing_style", "lighten"),
         callback = function(radio)
-            if save_document then
-                self.ui.document:deleteHighlight(page, item)
-            end
+            self:writePdfAnnotation("delete", page, item)
             item.drawer = radio.provider
-            if save_document then
-                self.ui.document:saveHighlight(page, item)
+            self:writePdfAnnotation("save", page, item)
+            local bm_note = self.ui.bookmark:getBookmarkNote(item)
+            if bm_note then
+                self:writePdfAnnotation("content", page, item, bm_note)
             end
             UIManager:setDirty(self.dialog, "ui")
             self.ui:handleEvent(Event:new("BookmarkUpdated",
@@ -1864,9 +1921,6 @@ end
 function ReaderHighlight:startSelection()
     self.highlight_page, self.highlight_idx = self:saveHighlight()
     self.select_mode = true
-    UIManager:show(Notification:new{
-        text = _("Select ending fragment"),
-    })
 end
 
 function ReaderHighlight:extendSelection()
@@ -1875,15 +1929,10 @@ function ReaderHighlight:extendSelection()
     local item1 = self.view.highlight.saved[self.highlight_page][self.highlight_idx]
     local item2_pos0, item2_pos1 = self.selected_text.pos0, self.selected_text.pos1
     -- getting starting and ending positions, text and pboxes of extended highlight
-    local new_pos0, new_pos1, new_text, new_pboxes
-    if self.ui.document.info.has_pages then
+    local new_pos0, new_pos1, new_text, new_pboxes, ext
+    if self.ui.paging then
+        local cur_page = self.hold_pos.page
         local is_reflow = self.ui.document.configurable.text_wrap
-        local new_page = self.hold_pos.page
-        -- reflow mode doesn't set page in positions
-        item1.pos0.page = new_page
-        item1.pos1.page = new_page
-        item2_pos0.page = new_page
-        item2_pos1.page = new_page
         -- pos0 and pos1 are not in order within highlights, hence sorting all
         local function comparePositions (pos1, pos2)
             return self.ui.document:comparePositions(pos1, pos2) == 1
@@ -1893,17 +1942,35 @@ function ReaderHighlight:extendSelection()
         table.sort(positions, comparePositions)
         new_pos0 = positions[1]
         new_pos1 = positions[4]
-        local text_boxes = self.ui.document:getTextFromPositions(new_pos0, new_pos1)
-        new_text = text_boxes.text
-        new_pboxes = text_boxes.pboxes
+        local temp_pos0, temp_pos1
+        if new_pos0.page == new_pos1.page then -- single-page highlight
+            local text_boxes = self.ui.document:getTextFromPositions(new_pos0, new_pos1)
+            new_text = text_boxes.text
+            new_pboxes = text_boxes.pboxes
+            temp_pos0, temp_pos1 = new_pos0, new_pos1
+        else -- multi-page highlight
+            new_text = ""
+            ext = {}
+            for page = new_pos0.page, new_pos1.page do
+                local item = self:getExtendedHighlightPage(new_pos0, new_pos1, page)
+                new_text = new_text .. item.text
+                ext[page] = { -- for every page of multi-page highlight
+                    pos0 = item.pos0,
+                    pos1 = item.pos1,
+                    pboxes = item.pboxes,
+                }
+                if page == cur_page then
+                    temp_pos0, temp_pos1 = item.pos0, item.pos1
+                end
+            end
+        end
         self.ui.document.configurable.text_wrap = is_reflow -- restore reflow
         -- draw
-        self.view.highlight.temp[new_page] = self.ui.document:getPageBoxesFromPositions(new_page, new_pos0, new_pos1)
+        self.view.highlight.temp[cur_page] = self.ui.document:getPageBoxesFromPositions(cur_page, temp_pos0, temp_pos1)
     else
         -- pos0 and pos1 are in order within highlights
         new_pos0 = self.ui.document:compareXPointers(item1.pos0, item2_pos0) == 1 and item1.pos0 or item2_pos0
         new_pos1 = self.ui.document:compareXPointers(item1.pos1, item2_pos1) == 1 and item2_pos1 or item1.pos1
-        self.hold_pos.page = self.ui.document:getPageFromXPointer(new_pos0)
         -- true to draw
         new_text = self.ui.document:getTextFromXPointers(new_pos0, new_pos1, true)
     end
@@ -1913,8 +1980,79 @@ function ReaderHighlight:extendSelection()
         pos0 = new_pos0,
         pos1 = new_pos1,
         pboxes = new_pboxes,
+        ext = ext,
     }
     UIManager:setDirty(self.dialog, "ui")
+end
+
+-- Calculates positions, text, pboxes of one page of selected multi-page highlight
+-- (For pdf documents only, reflow mode must be off)
+function ReaderHighlight:getExtendedHighlightPage(pos0, pos1, cur_page)
+    local item = {}
+    for page = pos0.page, pos1.page do
+        if page == cur_page then
+            local page_boxes = self.ui.document:getTextBoxes(page)
+            if page == pos0.page then
+                -- first page (from the start of highlight to the end of the page)
+                item.pos0 = pos0
+                item.pos1 = {
+                    x = page_boxes[#page_boxes][#page_boxes[#page_boxes]].x1,
+                    y = page_boxes[#page_boxes][#page_boxes[#page_boxes]].y1,
+                }
+            elseif page ~= pos1.page then
+                -- middle pages (full pages)
+                item.pos0 = {
+                    x = page_boxes[1][1].x0,
+                    y = page_boxes[1][1].y0,
+                }
+                item.pos1 = {
+                    x = page_boxes[#page_boxes][#page_boxes[#page_boxes]].x1,
+                    y = page_boxes[#page_boxes][#page_boxes[#page_boxes]].y1,
+                }
+            else
+                -- last page (from the start of the page to the end of highlight)
+                item.pos0 = {
+                    x = page_boxes[1][1].x0,
+                    y = page_boxes[1][1].y0,
+                }
+                item.pos1 = pos1
+            end
+            item.pos0.page = page
+            item.pos1.page = page
+            local text_boxes = self.ui.document:getTextFromPositions(item.pos0, item.pos1)
+            item.text = text_boxes.text
+            item.pboxes = text_boxes.pboxes
+        end
+    end
+    return item
+end
+
+-- Returns one page of saved multi-page highlight
+-- (For pdf documents only)
+function ReaderHighlight:getSavedExtendedHighlightPage(hl_or_bm, page, index)
+    local highlight
+    if hl_or_bm.ext then
+        highlight = hl_or_bm
+    else -- called from bookmark, need to find the corresponding highlight
+        for _, hl in ipairs(self.view.highlight.saved[hl_or_bm.page]) do
+            if hl.datetime == hl_or_bm.datetime then
+                highlight = hl
+                break
+            end
+        end
+    end
+    local item = {}
+    item.datetime = highlight.datetime
+    item.drawer = highlight.drawer
+    item.pos0 = highlight.ext[page].pos0
+    item.pos0.zoom = highlight.pos0.zoom
+    item.pos0.rotation = highlight.pos0.rotation
+    item.pos1 = highlight.ext[page].pos1
+    item.pos1.zoom = highlight.pos0.zoom
+    item.pos1.rotation = highlight.pos0.rotation
+    item.pboxes = highlight.ext[page].pboxes
+    item.parent = {highlight.pos0.page, index}
+    return item
 end
 
 function ReaderHighlight:onReadSettings(config)
@@ -2029,8 +2167,8 @@ end
 function ReaderHighlight:onMoveHighlightIndicator(args)
     if self.view.visible_area and self._current_indicator_pos then
         local dx, dy, quick_move = unpack(args)
-        local quick_move_distance_dx = self.view.visible_area.w / 5 -- quick move distance: fifth of visible_area
-        local quick_move_distance_dy = self.view.visible_area.h / 5
+        local quick_move_distance_dx = self.view.visible_area.w * (1/5) -- quick move distance: fifth of visible_area
+        local quick_move_distance_dy = self.view.visible_area.h * (1/5)
         -- single move distance, small and capable to move on word with small font size and narrow line height
         local move_distance = Size.item.height_default / 4
         local rect = self._current_indicator_pos:copy()
@@ -2092,6 +2230,5 @@ function ReaderHighlight:_createHighlightGesture(gesture)
         time = time.realtime(),
     }
 end
-
 
 return ReaderHighlight

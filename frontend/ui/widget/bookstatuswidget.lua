@@ -24,6 +24,7 @@ local ToggleSwitch = require("ui/widget/toggleswitch")
 local UIManager = require("ui/uimanager")
 local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
+local datetime = require("datetime")
 local util = require("util")
 local _ = require("gettext")
 local Screen = Device.screen
@@ -32,37 +33,32 @@ local T = require("ffi/util").template
 local stats_book = {}
 
 --[[
---Save into sdr folder addtional section
+-- Stored in the sidecar metadata, in a dedicated table:
 ["summary"] = {
     ["rating"] = 5,
     ["note"] = "Some text",
     ["status"] = "Reading"
     ["modified"] = "24.01.2016"
 },]]
-local BookStatusWidget = FocusManager:new{
+local BookStatusWidget = FocusManager:extend{
     padding = Size.padding.fullscreen,
     settings = nil,
     thumbnail = nil,
     props = nil,
-    star = {},
-    summary = {
-        rating = nil,
-        note = nil,
-        status = "",
-        modified = "",
-    },
+    star = nil, -- Button
+    summary = nil, -- hash
 }
 
 function BookStatusWidget:init()
     self.layout = {}
+    -- What a blank, full summary table should look like
+    local new_summary = {
+        rating = nil,
+        note = nil,
+        status = "",
+        modified = "",
+    }
     if self.settings then
-        -- What a blank, full summary table should look like
-        local new_summary = {
-            rating = nil,
-            note = nil,
-            status = "",
-            modified = "",
-        }
         local summary = self.settings:readSetting("summary")
         -- Check if the summary table we get is a full one, or a minimal one from CoverMenu...
         if summary then
@@ -77,6 +73,8 @@ function BookStatusWidget:init()
         else
             self.summary = new_summary
         end
+    else
+        self.summary = new_summary
     end
     self.total_pages = self.ui.document:getPageCount()
     stats_book = self:getStats()
@@ -101,7 +99,7 @@ function BookStatusWidget:init()
     }
 
     if Device:hasKeys() then
-        self.key_events.Close = { { Device.input.group.Back }, doc = "close dialog" }
+        self.key_events.Close = { { Device.input.group.Back } }
     end
     if Device:isTouchDevice() then
         self.ges_events.Swipe = {
@@ -147,7 +145,7 @@ end
 function BookStatusWidget:getStatHours()
     if stats_book.time then
         local user_duration_format = G_reader_settings:readSetting("duration_format", "classic")
-        return util.secondsToClockDuration(user_duration_format, stats_book.time, false)
+        return datetime.secondsToClockDuration(user_duration_format, stats_book.time, false)
     else
         return _("N/A")
     end
@@ -188,7 +186,7 @@ function BookStatusWidget:genHeader(title)
     local header_title = TextWidget:new{
         text = title,
         face = self.medium_font_face,
-        fgcolor = Blitbuffer.COLOR_WEB_GRAY,
+        fgcolor = Blitbuffer.COLOR_GRAY_9,
     }
 
     local padding_span = HorizontalSpan:new{ width = self.padding }
@@ -409,8 +407,8 @@ function BookStatusWidget:genStatisticsGroup(width)
 
     local statistics_group = VerticalGroup:new{ align = "left" }
 
-    local tile_width = width / 3
-    local tile_height = height / 2
+    local tile_width = width * (1/3)
+    local tile_height = height * (1/2)
 
     local titles_group = HorizontalGroup:new{
         align = "center",

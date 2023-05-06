@@ -30,9 +30,10 @@ local logger = require("logger")
 local dbg = require("dbg")
 local time = require("ui/time")
 local util = require("util")
+local xtext -- Delayed (and optional) loading
 local Screen = require("device").screen
 
-local TextBoxWidget = InputContainer:new{
+local TextBoxWidget = InputContainer:extend{
     text = nil,
     editable = false, -- Editable flag for whether drawing the cursor or not.
     justified = false, -- Should text be justified (spaces widened to fill width)
@@ -58,6 +59,7 @@ local TextBoxWidget = InputContainer:new{
     idx_pad = nil,     -- idx => pad for char at idx, if non zero
     vertical_string_list = nil,
     virtual_line_num = 1, -- index of the top displayed line
+    current_line_num = 1, -- index of the currently edited line (i.e., where our cursor is)
     line_height_px = nil, -- height of a line in px
     lines_per_page = nil, -- number of visible lines
     text_height = nil,    -- adjusted height to visible text (lines_per_page*line_height_px)
@@ -160,12 +162,10 @@ function TextBoxWidget:init()
     self.dimen = Geom:new(self:getSize())
 
     if Device:isTouchDevice() then
-        self.ges_events = {
-            TapImage = {
-                GestureRange:new{
-                    ges = "tap",
-                    range = function() return self.dimen end,
-                },
+        self.ges_events.TapImage = {
+            GestureRange:new{
+                ges = "tap",
+                range = function() return self.dimen end,
             },
         }
     end
@@ -244,7 +244,7 @@ end
 
 function TextBoxWidget:_measureWithXText()
     if not self._xtext_loaded then
-        require("libs/libkoreader-xtext")
+        xtext = require("libs/libkoreader-xtext")
         TextBoxWidget._xtext_loaded = true
     end
     if type(self.charlist) == "table" then
@@ -819,7 +819,7 @@ function TextBoxWidget:_renderText(start_row_idx, end_row_idx)
             end
             self:_shapeLine(line)
             if line.xglyphs then -- non-empty line
-                for __, xglyph in ipairs(line.xglyphs) do
+                for _, xglyph in ipairs(line.xglyphs) do
                     if not xglyph.no_drawing then
                         local face = self.face.getFallbackFont(xglyph.font_num) -- callback (not a method)
                         local glyph = RenderText:getGlyphByIndex(face, xglyph.glyph, self.bold)
@@ -1106,8 +1106,8 @@ function TextBoxWidget:getFontSizeToFitHeight(height_px, nb_lines, line_height_e
 end
 
 function TextBoxWidget:getCharPos()
-    -- returns virtual_line_num too
-    return self.charpos, self.virtual_line_num
+    -- returns virtual_line_num & current_line_num too
+    return self.charpos, self.virtual_line_num, self.current_line_num
 end
 
 function TextBoxWidget:getSize()
@@ -1363,6 +1363,7 @@ end
 
 -- Return the coordinates (relative to current view, so negative y is possible)
 -- of the left of char at charpos (use self.charpos if none provided)
+-- and the number of the line with charpos on the screen
 function TextBoxWidget:_getXYForCharPos(charpos)
     if not charpos then
         charpos = self.charpos
@@ -1389,6 +1390,7 @@ function TextBoxWidget:_getXYForCharPos(charpos)
         end
     end
     local y = (ln - self.virtual_line_num) * self.line_height_px
+    local screen_line_num = ln - self.virtual_line_num + 1
 
     -- Find the x offset in the current line.
 
@@ -1441,7 +1443,7 @@ function TextBoxWidget:_getXYForCharPos(charpos)
             end
         end
         -- logger.dbg("_getXYForCharPos(", charpos, "):", x, y)
-        return x, y
+        return x, y, screen_line_num
     end
 
     -- Only when not self.use_xtext:
@@ -1458,7 +1460,7 @@ function TextBoxWidget:_getXYForCharPos(charpos)
     -- Cursor can be drawn at x, it will be on the left of the char pointed by charpos
     -- (x=0 for first char of line - for end of line, it will be before the \n, the \n
     -- itself being not displayed)
-    return x, y
+    return x, y, screen_line_num
 end
 
 -- Return the charpos at provided coordinates (relative to current view,
@@ -1565,14 +1567,10 @@ local CURSOR_USE_REFRESH_FUNCS = G_reader_settings:nilOrTrue("ui_cursor_use_refr
 -- Update charpos to the one provided; if out of current view, update
 -- virtual_line_num to move it to view, and draw the cursor
 function TextBoxWidget:moveCursorToCharPos(charpos)
-    if not self.editable then
-        -- we shouldn't have been called if not editable
-        logger.warn("TextBoxWidget:moveCursorToCharPos called, but not editable")
-        return
-    end
     self.charpos = charpos
     self.prev_virtual_line_num = self.virtual_line_num
-    local x, y = self:_getXYForCharPos() -- we can get y outside current view
+    local x, y, screen_line_num = self:_getXYForCharPos() -- we can get y outside current view
+    self.current_line_num = screen_line_num
     -- adjust self.virtual_line_num for overflowed y to have y in current view
     if y < 0 then
         local scroll_lines = math.ceil( -y / self.line_height_px )
@@ -1711,6 +1709,30 @@ function TextBoxWidget:moveCursorToCharPos(charpos)
     end
 end
 
+-- Update view to show the line with charpos not far than <centered_lines_count> lines away
+-- from the center of the screen, and draw the cursor.
+function TextBoxWidget:moveCursorToCharPosKeepingViewCentered(charpos, centered_lines_count)
+    local old_virtual_line_num = self.virtual_line_num
+    self.for_measurement_only = true
+    self:moveCursorToCharPos(charpos)
+    self.for_measurement_only = false
+    local _, _, screen_line_num = self:_getXYForCharPos(charpos)
+    local new_virtual_line_num = self.virtual_line_num + screen_line_num - math.floor(self.lines_per_page / 2)
+    local max_virtual_line_num = #self.vertical_string_list - self.lines_per_page + 1
+    if new_virtual_line_num < 1 then
+        new_virtual_line_num = 1
+    elseif new_virtual_line_num > max_virtual_line_num then
+        new_virtual_line_num = max_virtual_line_num
+    end
+    if math.abs(new_virtual_line_num - old_virtual_line_num) > centered_lines_count then
+        self.virtual_line_num = new_virtual_line_num
+    else
+        self.virtual_line_num = old_virtual_line_num
+    end
+    self:_updateLayout()
+    self:moveCursorToCharPos(charpos)
+end
+
 function TextBoxWidget:moveCursorToXY(x, y, restrict_to_view)
     if restrict_to_view then
         -- Wrap y to current view (when getting coordinates from gesture)
@@ -1789,6 +1811,14 @@ function TextBoxWidget:moveCursorDown()
     self:moveCursorToXY(x, y + self.line_height_px)
 end
 
+function TextBoxWidget:moveCursorHome()
+    self:moveCursorToCharPos(self.vertical_string_list[self.current_line_num].offset)
+end
+
+function TextBoxWidget:moveCursorEnd()
+    self:moveCursorToCharPos(self.vertical_string_list[self.current_line_num+1] and self.vertical_string_list[self.current_line_num+1].offset - 1 or #self.charlist + 1)
+end
+
 
 --- Text selection with Hold
 
@@ -1833,8 +1863,6 @@ function TextBoxWidget:onHoldWord(callback, ges)
             idx = idx + 1
         end
     end
-
-    return
 end
 
 -- Allow selection of one or more words (with no visual feedback)

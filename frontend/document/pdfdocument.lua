@@ -10,7 +10,7 @@ local ffi = require("ffi")
 local C = ffi.C
 local pdf = nil
 
-local PdfDocument = Document:new{
+local PdfDocument = Document:extend{
     _document = false,
     is_pdf = true,
     dc_null = DrawContext.new(),
@@ -74,8 +74,8 @@ function PdfDocument:convertKoptToReflowableFontSize(font_size)
         return size * default_font_size
     elseif G_reader_settings:readSetting("kopt_font_size") then
         return G_reader_settings:readSetting("kopt_font_size") * default_font_size
-    elseif DKOPTREADER_CONFIG_FONT_SIZE then
-        return DKOPTREADER_CONFIG_FONT_SIZE * default_font_size
+    elseif G_defaults:readSetting("DKOPTREADER_CONFIG_FONT_SIZE") then
+        return G_defaults:readSetting("DKOPTREADER_CONFIG_FONT_SIZE") * default_font_size
     else
         return default_font_size
     end
@@ -121,12 +121,20 @@ function PdfDocument:getTextFromPositions(spos0, spos1)
     return self.koptinterface:getTextFromPositions(self, spos0, spos1)
 end
 
+function PdfDocument:getTextBoxes(pageno)
+    return self.koptinterface:getTextBoxes(self, pageno)
+end
+
 function PdfDocument:getPageBoxesFromPositions(pageno, ppos0, ppos1)
     return self.koptinterface:getPageBoxesFromPositions(self, pageno, ppos0, ppos1)
 end
 
 function PdfDocument:nativeToPageRectTransform(pageno, rect)
     return self.koptinterface:nativeToPageRectTransform(self, pageno, rect)
+end
+
+function PdfDocument:getSelectedWordContext(word, nb_words, pos)
+    return self.koptinterface:getSelectedWordContext(word, nb_words, pos)
 end
 
 function PdfDocument:getOCRWord(pageno, wbox)
@@ -389,7 +397,7 @@ function PdfDocument:register(registry)
     registry:addProvider("png", "image/png", self, 90)
     registry:addProvider("pnm", "image/x‑portable‑bitmap", self, 90)
     registry:addProvider("ppm", "image/x‑portable‑bitmap", self, 90)
-    registry:addProvider("svg", "image/svg+xml", self, 90)
+    registry:addProvider("svg", "image/svg+xml", self, 80)
     registry:addProvider("tif", "image/tiff", self, 90)
     registry:addProvider("tiff", "image/tiff", self, 90)
     -- Windows Media Photo == JPEG XR

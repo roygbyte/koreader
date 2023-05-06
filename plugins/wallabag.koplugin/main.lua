@@ -23,6 +23,7 @@ local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local filemanagerutil = require("apps/filemanager/filemanagerutil")
 local http = require("socket.http")
+local lfs = require("libs/libkoreader-lfs")
 local logger = require("logger")
 local ltn12 = require("ltn12")
 local socket = require("socket")
@@ -36,7 +37,7 @@ local article_id_prefix = "[w-id_"
 local article_id_postfix = "] "
 local failed, skipped, downloaded = 1, 2, 3
 
-local Wallabag = WidgetContainer:new{
+local Wallabag = WidgetContainer:extend{
     name = "wallabag",
 }
 
@@ -111,6 +112,18 @@ function Wallabag:init()
         res, self.dateparser = pcall(require, "lib.dateparser")
         if res then self.is_dateparser_available = true end
         self.is_dateparser_checked = true
+    end
+
+    if self.ui and self.ui.link then
+        self.ui.link:addToExternalLinkDialog("25_wallabag", function(this, link_url)
+            return {
+                text = _("Add to Wallabag"),
+                callback = function()
+                    UIManager:close(this.external_link_dialog)
+                    this.ui:handleEvent(Event:new("AddWallabagArticle", link_url))
+                end,
+            }
+        end)
     end
 end
 
@@ -464,7 +477,7 @@ function Wallabag:getArticleList()
             -- we may have hit the last page, there are no more articles
             logger.dbg("Wallabag: couldn't get page #", page)
             break -- exit while loop
-        elseif err then
+        elseif err or articles_json == nil then
             -- another error has occured. Don't proceed with downloading
             -- or deleting articles
             logger.warn("Wallabag: download of page #", page, "failed with", err, code)
@@ -484,7 +497,7 @@ function Wallabag:getArticleList()
         new_article_list = self:filterIgnoredTags(new_article_list)
 
         -- Append the filtered list to the final article list
-        for i, article in ipairs(new_article_list) do
+        for _, article in ipairs(new_article_list) do
             if #article_list == self.articles_per_sync then
                 logger.dbg("Wallabag: hit the article target", self.articles_per_sync)
                 break
@@ -631,11 +644,11 @@ function Wallabag:callAPI(method, apiurl, headers, body, filepath, quiet)
     logger.dbg("Wallabag: URL     ", request.url)
     logger.dbg("Wallabag: method  ", method)
 
-    local code, resp_headers = socket.skip(1, http.request(request))
+    local code, resp_headers, status = socket.skip(1, http.request(request))
     socketutil:reset_timeout()
     -- raise error message when network is unavailable
     if resp_headers == nil then
-        logger.dbg("Wallabag: Server error: ", code)
+        logger.dbg("Wallabag: Server error:", status or code)
         return nil, "network_error"
     end
     if code == 200 then
@@ -665,12 +678,14 @@ function Wallabag:callAPI(method, apiurl, headers, body, filepath, quiet)
             local entry_mode = lfs.attributes(filepath, "mode")
             if entry_mode == "file" then
                 os.remove(filepath)
-                logger.dbg("Wallabag: Removed failed download: ", filepath)
+                logger.dbg("Wallabag: Removed failed download:", filepath)
             end
         elseif not quiet then
             UIManager:show(InfoMessage:new{
                 text = _("Communication with server failed."), })
         end
+        logger.dbg("Wallabag: Request failed:", status or code)
+        logger.dbg("Wallabag: Response headers:", resp_headers)
         return nil, "http_error", code
     end
 end
@@ -709,7 +724,7 @@ function Wallabag:synchronize()
     if self.access_token ~= "" then
         local articles = self:getArticleList()
         if articles then
-            logger.dbg("Wallabag: number of articles: ", #articles)
+            logger.dbg("Wallabag: number of articles:", #articles)
 
             info = InfoMessage:new{ text = _("Downloading articles…") }
             UIManager:show(info)
@@ -1058,7 +1073,7 @@ Restart KOReader after editing the config file.]]), BD.dirpath(DataStorage:getSe
                 {
                     text = _("Apply"),
                     callback = function()
-                        local myfields = MultiInputDialog:getFields()
+                        local myfields = self.settings_dialog:getFields()
                         self.server_url    = myfields[1]
                         self.client_id     = myfields[2]
                         self.client_secret = myfields[3]
@@ -1101,7 +1116,7 @@ function Wallabag:editClientSettings()
                 {
                     text = _("Apply"),
                     callback = function()
-                        local myfields = MultiInputDialog:getFields()
+                        local myfields = self.client_settings_dialog:getFields()
                         self.articles_per_sync = math.max(1, tonumber(myfields[1]) or self.articles_per_sync)
                         self:saveSettings(myfields)
                         self.client_settings_dialog:onClose()

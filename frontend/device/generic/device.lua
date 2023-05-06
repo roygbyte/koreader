@@ -17,14 +17,11 @@ local function no() return false end
 
 local Device = {
     screen_saver_mode = false,
-    charging_mode = false,
-    survive_screen_saver = false,
+    screen_saver_lock = false,
     is_cover_closed = false,
-    should_restrict_JIT = false,
     model = nil,
     powerd = nil,
     screen = nil,
-    screen_dpi_override = nil,
     input = nil,
     home_dir = nil,
     -- For Kobo, wait at least 15 seconds before calling suspend script. Otherwise, suspend might
@@ -48,7 +45,6 @@ local Device = {
     hasNaturalLight = no, -- FL warmth implementation specific to NTX boards (Kobo, Cervantes)
     hasNaturalLightMixer = no, -- Same, but only found on newer boards
     hasNaturalLightApi = no,
-    needsTouchScreenProbe = no,
     hasClipboard = yes, -- generic internal clipboard on all devices
     hasEinkScreen = yes,
     hasExternalSD = no, -- or other storage volume that cannot be accessed using the File Manager
@@ -62,7 +58,6 @@ local Device = {
     canImportFiles = no,
     canShareText = no,
     hasGSensor = no,
-    canToggleGSensor = no,
     isGSensorLocked = no,
     canToggleMassStorage = no,
     canToggleChargingLED = no,
@@ -130,7 +125,7 @@ local Device = {
     canExternalDictLookup = no,
 }
 
-function Device:new(o)
+function Device:extend(o)
     o = o or {}
     setmetatable(o, self)
     self.__index = self
@@ -159,7 +154,6 @@ function Device:invertButtons()
 end
 
 function Device:init()
-    assert(self ~= nil)
     if not self.screen then
         error("screen/framebuffer must be implemented")
     end
@@ -208,7 +202,8 @@ function Device:init()
         self.screen:setViewport(self.viewport)
         self.input:registerEventAdjustHook(
             self.input.adjustTouchTranslate,
-            {x = 0 - self.viewport.x, y = 0 - self.viewport.y})
+            {x = 0 - self.viewport.x, y = 0 - self.viewport.y}
+        )
     end
 
     -- Handle button mappings shenanigans
@@ -218,8 +213,13 @@ function Device:init()
         end
     end
 
-    -- Honor the gyro lock
     if self:hasGSensor() then
+        -- Setup our standard gyro event handler (EV_MSC:MSC_GYRO)
+        if G_reader_settings:nilOrFalse("input_ignore_gsensor") then
+            self.input.handleGyroEv = self.input.handleMiscGyroEv
+        end
+
+        -- Honor the gyro lock
         if G_reader_settings:isTrue("input_lock_gsensor") then
             self:lockGSensor(true)
         end
@@ -259,7 +259,7 @@ function Device:onPowerEvent(ev)
     if self.screen_saver_mode then
         if ev == "Power" or ev == "Resume" then
             if self.is_cover_closed then
-                -- don't let power key press wake up device when the cover is in closed state
+                -- don't let power key press wake up device when the cover is in closed state.
                 self:rescheduleSuspend()
             else
                 logger.dbg("Resuming...")
@@ -273,18 +273,26 @@ function Device:onPowerEvent(ev)
                     end
                 end
                 self:resume()
-                Screensaver:close()
-                if self:needsScreenRefreshAfterResume() then
+                local widget_was_closed = Screensaver:close()
+                if widget_was_closed and self:needsScreenRefreshAfterResume() then
                     UIManager:scheduleIn(1, function() self.screen:refreshFull() end)
                 end
-                self.screen_saver_mode = false
                 self.powerd:afterResume()
             end
         elseif ev == "Suspend" then
             -- Already in screen saver mode, no need to update UI/state before
             -- suspending the hardware. This usually happens when sleep cover
             -- is closed after the device was sent to suspend state.
-            logger.dbg("Already in screen saver mode, suspending...")
+            logger.dbg("Already in screen saver mode, going back to suspend...")
+            -- Much like the real suspend codepath below, in case we got here via screen_saver_lock,
+            -- make sure we murder WiFi again (because restore WiFi on resume could have kicked in).
+            if self:hasWifiToggle() then
+                local network_manager = require("ui/network/manager")
+                if network_manager:isWifiOn() then
+                    network_manager:releaseIP()
+                    network_manager:turnOffWifi()
+                end
+            end
             self:rescheduleSuspend()
         end
     -- else we were not in screensaver mode
@@ -306,7 +314,8 @@ function Device:onPowerEvent(ev)
         if self:needsScreenRefreshAfterResume() then
             self.screen:refreshFull()
         end
-        self.screen_saver_mode = true
+        -- NOTE: In the same vein as above, this is delayed to make sure we update the screen first.
+        --       (This, unfortunately, means we can't just move this to Device:_beforeSuspend :/).
         UIManager:scheduleIn(0.1, function()
             -- NOTE: This side of the check needs to be laxer, some platforms can handle Wi-Fi without WifiManager ;).
             if self:hasWifiToggle() then
@@ -350,8 +359,7 @@ function Device:install()
         ok_callback = function()
             local save_quit = function()
                 self:saveSettings()
-                UIManager:quit()
-                UIManager._exit_code = 85
+                UIManager:quit(85)
             end
             UIManager:broadcastEvent(Event:new("Exit", save_quit))
         end,
@@ -384,9 +392,11 @@ function Device:suspend() end
 -- Hardware specific method to resume the device
 function Device:resume() end
 
+-- NOTE: These two should ideally run in the background, and only trip the action after a small delay,
+--       to give us time to quit first.
+--       e.g., os.execute("sleep 1 && shutdown -r now &")
 -- Hardware specific method to power off the device
 function Device:powerOff() end
-
 -- Hardware specific method to reboot the device
 function Device:reboot() end
 
@@ -421,8 +431,17 @@ function Device:performHapticFeedback(type) end
 -- Device specific method for toggling input events
 function Device:setIgnoreInput(enable) return true end
 
--- Device specific method for toggling the GSensor
-function Device:toggleGSensor(toggle) end
+-- Device agnostic method for toggling the GSensor
+-- (can be reimplemented if need be, but you really, really should try not to. c.f., Kobo, Kindle & PocketBook)
+function Device:toggleGSensor(toggle)
+    if not self:hasGSensor() then
+        return
+    end
+
+    if self.input then
+        self.input:toggleGyroEvents(toggle)
+    end
+end
 
 -- Whether or not the GSensor should be locked to the current orientation (i.e. Portrait <-> Inverted Portrait or Landscape <-> Inverted Landscape only)
 function Device:lockGSensor(toggle)
@@ -498,12 +517,12 @@ function Device:retrieveNetworkInfo()
                 pingok = os.execute("ping -q -w 3 -c 2 `ip r | grep default | tail -n 1 | cut -d ' ' -f 3` > /dev/null")
             end
             if pingok == 0 then
-                result = result .. "Gateway ping successful"
+                result = result .. _("Gateway ping successful")
             else
-                result = result .. "Gateway ping FAILED"
+                result = result .. _("Gateway ping FAILED")
             end
         else
-            result = result .. "No default gateway to ping"
+            result = result .. _("No default gateway to ping")
         end
         return result
     end
@@ -571,6 +590,127 @@ end
 
 function Device:untar(archive, extract_to)
     return os.execute(("./tar xf %q -C %q"):format(archive, extract_to))
+end
+
+-- Set device event handlers common to all devices
+function Device:_setEventHandlers(UIManager)
+    if self:canReboot() then
+        UIManager.event_handlers.Reboot = function(message_text)
+            local ConfirmBox = require("ui/widget/confirmbox")
+            UIManager:show(ConfirmBox:new{
+                text = message_text or _("Are you sure you want to reboot the device?"),
+                ok_text = _("Reboot"),
+                ok_callback = function()
+                    local Event = require("ui/event")
+                    UIManager:broadcastEvent(Event:new("Reboot"))
+                    UIManager:nextTick(UIManager.reboot_action)
+                end,
+            })
+        end
+    else
+        UIManager.event_handlers.Reboot = function() end
+    end
+
+    if self:canPowerOff() then
+        UIManager.event_handlers.PowerOff = function(message_text)
+            local ConfirmBox = require("ui/widget/confirmbox")
+            UIManager:show(ConfirmBox:new{
+                text = message_text or _("Are you sure you want to power off the device?"),
+                ok_text = _("Power off"),
+                ok_callback = function()
+                    local Event = require("ui/event")
+                    UIManager:broadcastEvent(Event:new("PowerOff"))
+                    UIManager:nextTick(UIManager.poweroff_action)
+                end,
+            })
+        end
+    else
+        UIManager.event_handlers.PowerOff = function() end
+    end
+
+    if self:canRestart() then
+        UIManager.event_handlers.Restart = function(message_text)
+            local ConfirmBox = require("ui/widget/confirmbox")
+            UIManager:show(ConfirmBox:new{
+                text = message_text or _("This will take effect on next restart."),
+                ok_text = _("Restart now"),
+                ok_callback = function()
+                    local Event = require("ui/event")
+                    UIManager:broadcastEvent(Event:new("Restart"))
+                end,
+                cancel_text = _("Restart later"),
+            })
+        end
+    else
+        UIManager.event_handlers.Restart = function(message_text)
+            local InfoMessage = require("ui/widget/infomessage")
+            UIManager:show(InfoMessage:new{
+                text = message_text or _("This will take effect on next restart."),
+            })
+        end
+    end
+
+    self:setEventHandlers(UIManager)
+end
+
+-- Devices can add additional event handlers by overwriting this method.
+function Device:setEventHandlers(UIManager)
+    -- These will be most probably overwritten in the device specific `setEventHandlers`
+    UIManager.event_handlers.Suspend = function()
+        self:_beforeSuspend(false)
+    end
+    UIManager.event_handlers.Resume = function()
+        self:_afterResume(false)
+    end
+end
+
+-- The common operations that should be performed before suspending the device.
+function Device:_beforeSuspend(inhibit)
+    local Event = require("ui/event")
+    local UIManager = require("ui/uimanager")
+    UIManager:flushSettings()
+    UIManager:broadcastEvent(Event:new("Suspend"))
+
+    if inhibit ~= false then
+        -- Block input events unrelated to power management
+        self.input:inhibitInput(true)
+
+        -- Disable key repeat to avoid useless chatter (especially where Sleep Covers are concerned...)
+        self:disableKeyRepeat()
+    end
+end
+
+-- The common operations that should be performed after resuming the device.
+function Device:_afterResume(inhibit)
+    if inhibit ~= false then
+        -- Restore key repeat
+        self:restoreKeyRepeat()
+
+        -- Restore full input handling
+        self.input:inhibitInput(false)
+    end
+
+    local Event = require("ui/event")
+    local UIManager = require("ui/uimanager")
+    UIManager:broadcastEvent(Event:new("Resume"))
+end
+
+-- The common operations that should be performed when the device is plugged to a power source.
+function Device:_beforeCharging()
+    -- Leave the kernel some time to figure it out ;o).
+    local Event = require("ui/event")
+    local UIManager = require("ui/uimanager")
+    UIManager:scheduleIn(1, function() self:setupChargingLED() end)
+    UIManager:broadcastEvent(Event:new("Charging"))
+end
+
+-- The common operations that should be performed when the device is unplugged from a power source.
+function Device:_afterNotCharging()
+    -- Leave the kernel some time to figure it out ;o).
+    local Event = require("ui/event")
+    local UIManager = require("ui/uimanager")
+    UIManager:scheduleIn(1, function() self:setupChargingLED() end)
+    UIManager:broadcastEvent(Event:new("NotCharging"))
 end
 
 return Device

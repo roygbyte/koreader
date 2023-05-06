@@ -14,7 +14,7 @@ local logger = require("logger")
 local time = require("ui/time")
 local util  = require("util")
 
-local HtmlBoxWidget = InputContainer:new{
+local HtmlBoxWidget = InputContainer:extend{
     bb = nil,
     dimen = nil,
     document = nil,
@@ -27,12 +27,10 @@ local HtmlBoxWidget = InputContainer:new{
 
 function HtmlBoxWidget:init()
     if Device:isTouchDevice() then
-        self.ges_events = {
-            TapText = {
-                GestureRange:new{
-                    ges = "tap",
-                    range = function() return self.dimen end,
-                },
+        self.ges_events.TapText = {
+            GestureRange:new{
+                ges = "tap",
+                range = function() return self.dimen end,
             },
         }
     end
