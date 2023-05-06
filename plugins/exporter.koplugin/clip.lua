@@ -1,16 +1,16 @@
+local DataStorage = require("datastorage")
 local DocumentRegistry = require("document/documentregistry")
 local DocSettings = require("docsettings")
-local ReadHistory = require("readhistory")
+local ffiutil = require("ffi/util")
 local lfs = require("libs/libkoreader-lfs")
 local logger = require("logger")
 local md5 = require("ffi/sha2").md5
 local util = require("util")
 local _ = require("gettext")
-local T = require("ffi/util").template
+local T = ffiutil.template
 
 local MyClipping = {
     my_clippings = "/mnt/us/documents/My Clippings.txt",
-    history_dir = "./history",
 }
 
 function MyClipping:new(o)
@@ -321,30 +321,36 @@ function MyClipping:parseHistoryFile(clippings, history_file, doc_file)
             return
         end
         local _, docname = util.splitFilePathName(doc_file)
-        local title, author = self:parseTitleFromPath(util.splitFileNameSuffix(docname), doc_file)
-        clippings[title] = {
+        local parsed_title, parsed_author = self:parseTitleFromPath(util.splitFileNameSuffix(docname), doc_file)
+        clippings[parsed_title] = {
             file = doc_file,
-            title = title,
-            author = author,
+            title = stored.stats.title or parsed_title,
+            author = stored.stats.authors or parsed_author,
         }
-        self:parseHighlight(stored.highlight, stored.bookmarks, clippings[title])
+        self:parseHighlight(stored.highlight, stored.bookmarks, clippings[parsed_title])
     end
 end
 
 function MyClipping:parseHistory()
     local clippings = {}
-    for f in lfs.dir(self.history_dir) do
-        self:parseHistoryFile(clippings,
-                              self.history_dir .. "/" .. f,
-                              DocSettings:getPathFromHistory(f) .. "/" ..
-                              DocSettings:getNameFromHistory(f))
+    local history_dir = DataStorage:getHistoryDir()
+    if lfs.attributes(history_dir, "mode") == "directory" then
+        for f in lfs.dir(history_dir) do
+            local legacy_history_file = ffiutil.joinPath(history_dir, f)
+            if lfs.attributes(legacy_history_file, "mode") == "file" then
+                local doc_file = DocSettings:getFileFromHistory(f)
+                if doc_file then
+                    self:parseHistoryFile(clippings, legacy_history_file, doc_file)
+                end
+            end
+        end
     end
-    for _, item in ipairs(ReadHistory.hist) do
-        self:parseHistoryFile(clippings,
-                              DocSettings:getSidecarFile(item.file),
-                              item.file)
+    for _, item in ipairs(require("readhistory").hist) do
+        if not item.dim then
+            self:parseHistoryFile(clippings, DocSettings:getSidecarFile(item.file, "doc"), item.file)
+            self:parseHistoryFile(clippings, DocSettings:getSidecarFile(item.file, "dir"), item.file)
+        end
     end
-
     return clippings
 end
 
@@ -388,8 +394,8 @@ function MyClipping:getDocMeta(view)
     end
     return {
         title = title,
-        -- To make sure that export doesn't fail due to unsupported charchters.
-        exportable_title = parsed_title,
+        -- Replaces characters that are invalid in filenames.
+        output_filename = util.getSafeFilename(title),
         author = author,
         number_of_pages = number_of_pages,
         file = view.document.file,

@@ -31,13 +31,14 @@ local MyClipping = require("clip")
 local NetworkMgr = require("ui/network/manager")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
+local T = require("ffi/util").template
 local logger = require("logger")
 local _ = require("gettext")
 
 
 -- migrate settings from old "evernote.koplugin" or from previous (monolithic) "exporter.koplugin"
 local function migrateSettings()
-    local formats = { "html", "joplin", "json", "readwise", "text" }
+    local formats = { "html", "joplin", "json", "readwise", "text", "my_clippings" }
 
     local settings = G_reader_settings:readSetting("exporter")
     if not settings then
@@ -103,6 +104,7 @@ local Exporter = WidgetContainer:extend{
         markdown = require("target/markdown"),
         readwise = require("target/readwise"),
         text = require("target/text"),
+        my_clippings = require("target/my_clippings"),
     },
 }
 
@@ -184,12 +186,12 @@ function Exporter:exportClippings(clippings)
                     local status = v:export(exportables)
                     if status then
                         if v.is_remote then
-                            table.insert(statuses, _(v.name .. ": Exported successfully."))
+                            table.insert(statuses, T(_("%1: Exported successfully."), v.name))
                         else
-                            table.insert(statuses, _(v.name .. ": Exported to " ) .. v:getFilePath(exportables))
+                            table.insert(statuses, T(_("%1: Exported to %2."), v.name, v:getFilePath(exportables)))
                         end
                     else
-                        table.insert(statuses, _(v.name .. ": Failed to export."))
+                        table.insert(statuses, T(_("%1: Failed to export."), v.name))
                     end
                     v.timestamp = nil
                 end
@@ -218,7 +220,7 @@ function Exporter:addToMainMenu(menu_items)
     for k, v in pairs(self.targets) do
         submenu[#submenu + 1] = v:getMenuTable()
         if v.shareable then
-            sharemenu[#sharemenu + 1] = { text = _("Share as " .. v.name), callback = function()
+            sharemenu[#sharemenu + 1] = { text = T(_("Share as %1."), v.name), callback = function()
                 local clippings = self:getDocumentClippings()
                 local document
                 for _, notes in pairs(clippings) do

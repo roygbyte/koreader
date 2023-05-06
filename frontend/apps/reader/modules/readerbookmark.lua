@@ -245,13 +245,19 @@ function ReaderBookmark:isBookmarkInPositionOrder(a, b)
             if compare_xp then
                 if compare_xp == 0 then -- both bookmarks with the same start
                     if a.highlighted and b.highlighted then -- both are highlights, compare ends
-                        return self.ui.document:compareXPointers(a.pos1, b.pos1) < 0
+                        compare_xp = self.ui.document:compareXPointers(a.pos1, b.pos1)
+                        if compare_xp then
+                            return compare_xp < 0
+                        end
+                        logger.warn("Invalid xpointer in highlight:", a.pos1, b.pos1)
+                        return
                     end
                     return a.highlighted -- have page bookmarks before highlights
                 end
                 return compare_xp < 0
             end
             -- if compare_xp is nil, some xpointer is invalid and will be sorted first to page 1
+            logger.warn("Invalid xpointer in highlight:", a.page, b.page)
         end
         return a_page > b_page
     end
@@ -372,7 +378,6 @@ end
 function ReaderBookmark:onSaveSettings()
     self.ui.doc_settings:saveSetting("bookmarks", self.bookmarks)
     self.ui.doc_settings:saveSetting("bookmarks_version", 20200615)
-    self.ui.doc_settings:makeTrue("bookmarks_sorted")
     self.ui.doc_settings:makeTrue("bookmarks_sorted_20220106")
     self.ui.doc_settings:makeTrue("highlights_imported")
 end
@@ -380,7 +385,7 @@ end
 function ReaderBookmark:onToggleBookmark()
     self:toggleBookmark()
     self.view.footer:onUpdateFooter(self.view.footer_visible)
-    self.ui:handleEvent(Event:new("SetDogearVisibility", not self.view.dogear_visible))
+    self.view.dogear:onSetDogearVisibility(not self.view.dogear_visible)
     UIManager:setDirty(self.view.dialog, "ui")
     return true
 end
@@ -391,7 +396,7 @@ function ReaderBookmark:isPageBookmarked(pn_or_xp)
 end
 
 function ReaderBookmark:setDogearVisibility(pn_or_xp)
-    self.ui:handleEvent(Event:new("SetDogearVisibility", self:isPageBookmarked(pn_or_xp)))
+    self.view.dogear:onSetDogearVisibility(self:isPageBookmarked(pn_or_xp))
 end
 
 function ReaderBookmark:onPageUpdate(pageno)
@@ -838,7 +843,7 @@ function ReaderBookmark:isBookmarkMatch(item, pn_or_xp)
     if self.ui.paging then
         return item.page == pn_or_xp
     else
-        return self.ui.document:isXPointerInCurrentPage(item.page)
+        return self.ui.document:getPageFromXPointer(item.page) == self.ui.document:getPageFromXPointer(pn_or_xp)
     end
 end
 
@@ -996,7 +1001,6 @@ function ReaderBookmark:setBookmarkNote(item, from_highlight, is_new_note, new_t
         bookmark.type = self:getBookmarkType(bookmark)
         bookmark.text_orig = bm.text or bm.notes
         bookmark.mandatory = self:getBookmarkPageString(bm.page)
-        self.ui:handleEvent(Event:new("BookmarkEdited", bm))
     else
         bookmark = item
     end
@@ -1058,7 +1062,9 @@ function ReaderBookmark:setBookmarkNote(item, from_highlight, is_new_note, new_t
                         local bm = self.bookmarks[index]
                         bm.text = value
                         self.ui:handleEvent(Event:new("BookmarkEdited", bm))
-                        self.ui.highlight:writePdfAnnotation("content", bookmark.page, bookmark, bookmark.text)
+                        if bookmark.highlighted then
+                            self.ui.highlight:writePdfAnnotation("content", bookmark.page, bookmark, bookmark.text)
+                        end
                         UIManager:close(self.input)
                         if from_highlight then
                             if self.view.highlight.note_mark then
@@ -1130,15 +1136,16 @@ function ReaderBookmark:onSearchBookmark(bm_menu)
         parent = input_dialog,
     }
     input_dialog:addWidget(check_button_case)
+    local separator_width = input_dialog:getAddedWidgetAvailableWidth()
     separator = CenterContainer:new{
         dimen = Geom:new{
-            w = input_dialog._input_widget.width,
+            w = separator_width,
             h = 2 * Size.span.vertical_large,
         },
         LineWidget:new{
             background = Blitbuffer.COLOR_DARK_GRAY,
             dimen = Geom:new{
-                w = input_dialog._input_widget.width,
+                w = separator_width,
                 h = Size.line.medium,
             }
         },
@@ -1184,8 +1191,17 @@ function ReaderBookmark:doesBookmarkMatchTable(item, match_table)
     end
 end
 
-function ReaderBookmark:toggleBookmark()
-    local pn_or_xp = self:getCurrentPageNumber()
+function ReaderBookmark:toggleBookmark(pageno)
+    local pn_or_xp
+    if pageno then
+        if self.ui.rolling then
+            pn_or_xp = self.ui.document:getPageXPointer(pageno)
+        else
+            pn_or_xp = pageno
+        end
+    else
+        pn_or_xp = self:getCurrentPageNumber()
+    end
     local index = self:getDogearBookmarkIndex(pn_or_xp)
     if index then
         self.ui:handleEvent(Event:new("BookmarkRemoved", self.bookmarks[index]))

@@ -106,7 +106,7 @@ function UIManager:init()
 
     -- A simple wrapper for UIManager:quit()
     -- This may be overwritten by setRunForeverMode(); for testing purposes
-    self._gated_quit = self.quit
+    self:unsetRunForeverMode()
 end
 
 --[[--
@@ -158,11 +158,7 @@ function UIManager:show(widget, refreshtype, refreshregion, x, y, refreshdither)
     -- tell the widget that it is shown now
     widget:handleEvent(Event:new("Show"))
     -- check if this widget disables double tap gesture
-    if widget.disable_double_tap == false then
-        Input.disable_double_tap = false
-    else
-        Input.disable_double_tap = true
-    end
+    Input.disable_double_tap = widget.disable_double_tap ~= false
     -- a widget may override tap interval (when it doesn't, nil restores the default)
     Input.tap_interval_override = widget.tap_interval_override
 end
@@ -225,7 +221,7 @@ function UIManager:close(widget, refreshtype, refreshregion, refreshdither)
                 end
             end
 
-            -- Set double tap to how the topmost specifying widget wants it
+            -- Set double tap to how the topmost widget with that flag wants it
             if requested_disable_double_tap == nil and w.disable_double_tap ~= nil then
                 requested_disable_double_tap = w.disable_double_tap
             end
@@ -244,6 +240,16 @@ function UIManager:close(widget, refreshtype, refreshregion, refreshdither)
             self:setDirty(self._window_stack[i].widget)
         end
         self:_refresh(refreshtype, refreshregion, refreshdither)
+    end
+end
+
+--- Shift the execution times of all scheduled tasks.
+-- UIManager uses CLOCK_MONOTONIC (which doesn't tick during standby), so shifting the execution
+-- time by a negative value will lead to an execution at the expected time.
+-- @param time if positive execute the tasks later, if negative they should be executed earlier
+function UIManager:shiftScheduledTasksBy(shift_time)
+    for i, v in ipairs(self._task_queue) do
+        v.time = v.time + shift_time
     end
 end
 
@@ -355,7 +361,7 @@ function UIManager:debounce(seconds, immediate, action)
         else
             is_scheduled = false
             if not immediate then
-                result = action(unpack(args))
+                result = action(unpack(args, 1, args.n))
             end
             if not is_scheduled then
                 -- This check is needed because action can recursively call debounced_action_wrapper
@@ -370,7 +376,7 @@ function UIManager:debounce(seconds, immediate, action)
             self:scheduleIn(seconds, scheduled_action)
             is_scheduled = true
             if immediate then
-                result = action(unpack(args))
+                result = action(unpack(args, 1, args.n))
             end
         end
         return result
@@ -733,36 +739,29 @@ function UIManager:getNthTopWidget(n)
     return widget
 end
 
---[[--
-Get the *second* topmost widget, if there is one (name if possible, ref otherwise).
-
-Useful when VirtualKeyboard is involved, as it *always* steals the top spot ;).
-
-NOTE: Will skip over VirtualKeyboard instances, plural, in case there are multiple (because, apparently, we can do that.. ugh).
---]]
-function UIManager:getSecondTopmostWidget()
-    if #self._window_stack < 2 then
-        -- Not enough widgets in the stack, bye!
-        return nil
+--- Top-to-bottom widgets iterator
+--- NOTE: VirtualKeyboard can be instantiated multiple times, and is a modal,
+--        so don't be suprised if you find a couple of instances of it at the top ;).
+function UIManager:topdown_widgets_iter()
+    local n = #self._window_stack
+    local i = n + 1
+    return function()
+        i = i - 1
+        if i > 0 then
+            return self._window_stack[i].widget
+        end
     end
+end
 
-    -- Because everything is terrible, you can actually instantiate multiple VirtualKeyboards,
-    -- and they'll stack at the top, so, loop until we get something that *isn't* VK...
-    for i = #self._window_stack - 1, 1, -1 do
+--- Get the topmost visible widget
+function UIManager:getTopmostVisibleWidget()
+    for i = #self._window_stack, 1, -1 do
         local widget = self._window_stack[i].widget
-
-        if widget.name then
-            if widget.name ~= "VirtualKeyboard" then
-                return widget.name
-            end
-            -- Meaning if name is set, and is set to VK => continue, as we want the *next* widget.
-            -- I *really* miss the continue keyword, Lua :/.
-        else
+        -- Skip invisible widgets (e.g., TrapWidget)
+        if not widget.invisible then
             return widget
         end
     end
-
-    return nil
 end
 
 --- Check if a widget is still in the window stack, or is a subwidget of a widget still in the window stack.
@@ -789,14 +788,21 @@ end
 
 --- Signals to quit.
 -- An exit_code of false is not allowed.
-function UIManager:quit(exit_code)
+function UIManager:quit(exit_code, implicit)
     if exit_code == false then
         logger.err("UIManager:quit() called with false")
         return
     end
     -- Also honor older exit codes; default to 0
     self._exit_code = exit_code or self._exit_code or 0
-    logger.info("quitting uimanager with exit code:", self._exit_code)
+    if not implicit then
+        -- Explicit call via UIManager:quit (as opposed to self:_gated_quit)
+        if exit_code then
+            logger.info("Preparing to quit UIManager with exit code:", exit_code)
+        else
+            logger.info("Preparing to quit UIManager")
+        end
+    end
     self._task_queue_dirty = false
     self._window_stack = {}
     self._task_queue = {}
@@ -822,7 +828,7 @@ end
 
 -- Enable automatic UIManager quit; for testing purposes
 function UIManager:unsetRunForeverMode()
-    self._gated_quit = self.quit
+    self._gated_quit = function() return self:quit(nil, true) end
 end
 
 -- Ignore an empty window stack *once*; for startup w/ a missing last_file shenanigans...
@@ -981,7 +987,7 @@ function UIManager:_checkTasks()
             -- NOTE: Said task's action might modify _task_queue.
             --       To avoid race conditions and catch new upcoming tasks during this call,
             --       we repeatedly check the head of the queue (c.f., #1758).
-            task.action(unpack(task.args))
+            task.action(unpack(task.args, 1, task.args.n))
         else
             -- As the queue is sorted in descending order, it's safe to assume all items are currently future tasks.
             wait_until = task_time
@@ -1127,7 +1133,7 @@ function UIManager:_refresh(mode, region, dither)
     --       (Putting "ui" in that list is problematic with a number of UI elements, most notably, ReaderHighlight,
     --       because it is implemented as "ui" over the full viewport, since we can't devise a proper bounding box).
     --       So we settle for only "partial", but treating full-screen ones slightly differently.
-    if mode == "partial" and not self.refresh_counted then
+    if mode == "partial" and self.FULL_REFRESH_COUNT > 0 and not self.refresh_counted then
         self.refresh_count = (self.refresh_count + 1) % self.FULL_REFRESH_COUNT
         if self.refresh_count == self.FULL_REFRESH_COUNT - 1 then
             -- NOTE: Promote to "full" if no region (reader), to "flashui" otherwise (UI)
@@ -1294,6 +1300,11 @@ function UIManager:forceRePaint()
     self:_repaint()
 end
 
+function UIManager:avoidFlashOnNextRepaint()
+    -- Avoid going through the "partial" to "full" refresh promotion: pretend we already checked that.
+    self.refresh_counted = true
+end
+
 --[[--
 Ask the EPDC to *block* until our previous refresh ioctl has completed.
 
@@ -1341,7 +1352,7 @@ This is an explicit repaint *now*: it bypasses and ignores the paint queue (unli
 function UIManager:widgetRepaint(widget, x, y)
     if not widget then return end
 
-    logger.dbg("Explicit widgetRepaint:", widget.name or widget.id or tostring(widget), "@ (", x, ",", y, ")")
+    logger.dbg("Explicit widgetRepaint:", widget.name or widget.id or tostring(widget), "@", x, y)
     if widget.show_parent and widget.show_parent.cropping_widget then
         -- The main widget parent of this subwidget has a cropping container: see if
         -- this widget is a child of this cropping container
@@ -1368,7 +1379,7 @@ Same idea as `widgetRepaint`, but does a simple `bb:invertRect` on the Screen bu
 function UIManager:widgetInvert(widget, x, y, w, h)
     if not widget then return end
 
-    logger.dbg("Explicit widgetInvert:", widget.name or widget.id or tostring(widget), "@ (", x, ",", y, ")")
+    logger.dbg("Explicit widgetInvert:", widget.name or widget.id or tostring(widget), "@", x, y)
     if widget.show_parent and widget.show_parent.cropping_widget then
         -- The main widget parent of this subwidget has a cropping container: see if
         -- this widget is a child of this cropping container
@@ -1552,6 +1563,7 @@ function UIManager:run()
         self.looper:start()
     end
 
+    logger.info("Tearing down UIManager with exit code:", self._exit_code)
     return self._exit_code
 end
 

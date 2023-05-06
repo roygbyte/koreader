@@ -64,6 +64,7 @@ end
 
 local ReaderLink = InputContainer:extend{
     location_stack = nil, -- table, per-instance
+    forward_location_stack = nil, -- table, per-instance
     _external_link_buttons = nil,
 }
 
@@ -250,7 +251,7 @@ ReaderLink.onPhysicalKeyboardConnected = ReaderLink.registerKeyEvents
 
 function ReaderLink:onReadSettings(config)
     -- called when loading new document
-    self.location_stack = {}
+    self:onClearLocationStack()
 end
 
 local function isTapToFollowLinksOn()
@@ -301,6 +302,21 @@ function ReaderLink:addToMainMenu(menu_items)
                 ok_text = _("Clear"),
                 ok_callback = function()
                     self:onClearLocationStack()
+                    touchmenu_instance:closeMenu()
+                end,
+            })
+        end,
+    }
+    menu_items.go_to_next_location = {
+        text = _("Go Forward to next location"),
+        enabled_func = function() return self.forward_location_stack and #self.forward_location_stack > 0 end,
+        callback = function() self:onGoForwardLink() end,
+        hold_callback = function(touchmenu_instance)
+            UIManager:show(ConfirmBox:new{
+                text = _("Clear Forward location history?"),
+                ok_text = _("Clear"),
+                ok_callback = function()
+                    self:onClearForwardLocationStack()
                     touchmenu_instance:closeMenu()
                 end,
             })
@@ -537,7 +553,7 @@ function ReaderLink:isXpointerCoherent(a_xpointer)
         -- but easier to workaround here that way)
         re_link_xpointer, re_a_xpointer = self.ui.document:getLinkFromPosition({x = screen_x+1, y = screen_y}) -- luacheck: no unused
         if re_a_xpointer ~= a_xpointer then
-            logger.info("not coherent a_xpointer:", a_xpointer)
+            logger.info("noncoherent a_xpointer:", a_xpointer)
             return false
         end
     end
@@ -563,8 +579,7 @@ function ReaderLink:getLinkFromGes(ges)
         end
     else
         local link_xpointer, a_xpointer = self.ui.document:getLinkFromPosition(ges.pos)
-        logger.dbg("getLinkFromPosition link_xpointer:", link_xpointer)
-        logger.dbg("getLinkFromPosition a_xpointer:",  a_xpointer)
+        logger.dbg("ReaderLink:getLinkFromPosition @", ges.pos.x, ges.pos.y, "from a_xpointer:", a_xpointer, "to link_xpointer:", link_xpointer)
 
         -- On some documents, crengine may sometimes give a wrong a_xpointer
         -- (in some Wikipedia saved as EPUB, it would point to some other <A>
@@ -580,8 +595,8 @@ function ReaderLink:getLinkFromGes(ges)
             -- This link's source xpointer is more precise than a classic
             -- xpointer to top of a page: we can show a marker at its
             -- y-position in target page
-            -- (keep a_xpointer even if incoherent, might be needed for
-            -- footnote detection (better than nothing if incoherent)
+            -- (keep a_xpointer even if noncoherent, might be needed for
+            -- footnote detection (better than nothing if noncoherent)
             return {
                 xpointer = link_xpointer,
                 marker_xpointer = link_xpointer,
@@ -663,24 +678,57 @@ function ReaderLink:onTap(_, ges)
     end
 end
 
---- Remember current location so we can go back to it
-function ReaderLink:addCurrentLocationToStack()
+function ReaderLink:getCurrentLocation()
+    local location
     if self.ui.document.info.has_pages then
-        table.insert(self.location_stack, self.ui.paging:getBookLocation())
+        location = self.ui.paging:getBookLocation()
     else
-        table.insert(self.location_stack, {
-            xpointer = self.ui.rolling:getBookLocation(),
-        })
+        location = {xpointer = self.ui.rolling:getBookLocation(),}
     end
+    return location
+end
+
+-- Returns true, current_location if the current location is the same as the
+-- saved_location on the top of the stack.
+-- Otherwise returns false, current_location
+function ReaderLink:compareLocationToCurrent(saved_location)
+    local current_location = self:getCurrentLocation()
+    if self.ui.rolling and saved_location.xpointer and saved_location.xpointer == current_location.xpointer then
+        return true, current_location
+    end
+    if self.ui.paging and saved_location[1] and current_location[1] and current_location[1].page == saved_location[1].page then
+        return true, current_location
+    end
+    return false, current_location
+end
+
+function ReaderLink:onAddCurrentLocationToStack(show_notification)
+    self:addCurrentLocationToStack()
+    if show_notification then
+        Notification:notify(_("Current location added to history."))
+    end
+end
+
+-- Remember current location so we can go back to it
+function ReaderLink:addCurrentLocationToStack(loc)
+    local location = loc and loc or self:getCurrentLocation()
+    self:onClearForwardLocationStack()
+    table.insert(self.location_stack, location)
 end
 
 function ReaderLink:onClearLocationStack(show_notification)
     self.location_stack = {}
+    self:onClearForwardLocationStack()
     if show_notification then
         UIManager:show(Notification:new{
             text = _("Location history cleared."),
         })
     end
+    return true
+end
+
+function ReaderLink:onClearForwardLocationStack()
+    self.forward_location_stack = {}
     return true
 end
 
@@ -703,12 +751,11 @@ end
 -- (This is called by other modules (highlight, search) to jump to a xpointer,
 -- they should not provide allow_footnote_popup=true)
 function ReaderLink:onGotoLink(link, neglect_current_location, allow_footnote_popup)
-    logger.dbg("onGotoLink:", link)
     local link_url
     if self.ui.document.info.has_pages then
         -- internal pdf links have a "page" attribute, while external ones have an "uri" attribute
         if link.page then -- Internal link
-            logger.dbg("Internal link:", link)
+            logger.dbg("ReaderLink:onGotoLink: Internal link:", link)
             if not neglect_current_location then
                 self:addCurrentLocationToStack()
             end
@@ -724,7 +771,7 @@ function ReaderLink:onGotoLink(link, neglect_current_location, allow_footnote_po
         -- Best to check that this link exists in document with the following,
         -- which accepts both of the above legitimate xpointer as input.
         if self.ui.document:isXPointerInDocument(link.xpointer) then
-            logger.dbg("Internal link:", link)
+            logger.dbg("ReaderLink:onGotoLink: Internal link:", link)
             if allow_footnote_popup then
                 if self:showAsFootnotePopup(link, neglect_current_location) then
                     return true
@@ -753,7 +800,7 @@ function ReaderLink:onGotoLink(link, neglect_current_location, allow_footnote_po
                             marker_xpointer = link.from_xpointer,
                         }
                     end
-                    table.insert(self.location_stack, saved_location)
+                    self:addCurrentLocationToStack(saved_location)
                 else
                     self:addCurrentLocationToStack()
                 end
@@ -763,7 +810,7 @@ function ReaderLink:onGotoLink(link, neglect_current_location, allow_footnote_po
         end
         link_url = link.xpointer -- external link
     end
-    logger.dbg("External link:", link_url)
+    logger.dbg("ReaderLink:onGotoLink: External link:", link_url)
 
     local is_http_link = link_url:find("^https?://") ~= nil
     if is_http_link and self:onGoToExternalLink(link_url) then
@@ -829,6 +876,24 @@ end
 function ReaderLink:onGoBackLink(show_notification_if_empty)
     local saved_location = table.remove(self.location_stack)
     if saved_location then
+        local same_page, current_location = self:compareLocationToCurrent(saved_location)
+        -- If there are no forward items
+        if #self.forward_location_stack == 0 then
+            -- If we are not on the same page as the current item,
+            -- then add our current location to the forward stack
+            if not same_page then
+                table.insert(self.forward_location_stack, current_location)
+            end
+        end
+        if same_page then
+            -- If we are on the same page pass through to the next location
+            table.insert(self.forward_location_stack, saved_location)
+            saved_location = table.remove(self.location_stack)
+        end
+    end
+
+    if saved_location then
+        table.insert(self.forward_location_stack, saved_location)
         logger.dbg("GoBack: restoring:", saved_location)
         self.ui:handleEvent(Event:new('RestoreBookLocation', saved_location))
         return true
@@ -836,6 +901,26 @@ function ReaderLink:onGoBackLink(show_notification_if_empty)
         UIManager:show(Notification:new{
             text = _("Location history is empty."),
         })
+    end
+end
+
+--- Goes to next location.
+function ReaderLink:onGoForwardLink()
+    local saved_location = table.remove(self.forward_location_stack)
+    if saved_location then
+        local same_page = self:compareLocationToCurrent(saved_location)
+        if same_page then
+            -- If we are on the same page pass through to the next location
+            table.insert(self.location_stack, saved_location)
+            saved_location = table.remove(self.forward_location_stack)
+        end
+    end
+
+    if saved_location then
+        table.insert(self.location_stack, saved_location)
+        logger.dbg("GoForward: restoring:", saved_location)
+        self.ui:handleEvent(Event:new('RestoreBookLocation', saved_location))
+        return true
     end
 end
 
@@ -876,10 +961,9 @@ end
 
 --- Goes to link nearest to the gesture (or first link in page)
 function ReaderLink:onGoToPageLink(ges, internal_links_only, max_distance)
-    local selected_link = nil
-    local selected_distance2 = nil
-    -- We use squares of distances all along the calculations, no need
-    -- to math.sqrt() them when comparing
+    local selected_link, selected_distance2
+    -- We use squared distances throughout the computations,
+    -- no need to math.sqrt() anything for comparisons.
     if self.ui.document.info.has_pages then
         local pos = self.view:screenToPageTransform(ges.pos)
         if not pos then
@@ -901,7 +985,7 @@ function ReaderLink:onGoToPageLink(ges, internal_links_only, max_distance)
         --         ["page"] = 347
         --     },
         local pos_x, pos_y = pos.x, pos.y
-        local shortest_dist = nil
+        local shortest_dist
         for _, link in ipairs(links) do
             if not internal_links_only or link.page then
                 local start_dist = (link.x0 - pos_x)^2 + (link.y0 - pos_y)^2
@@ -917,15 +1001,16 @@ function ReaderLink:onGoToPageLink(ges, internal_links_only, max_distance)
         end
         if shortest_dist then
             selected_distance2 = shortest_dist
+            if max_distance and selected_distance2 > max_distance^2 then
+                selected_link = nil
+            end
         end
     else
-        -- Getting segments on a page with many internal links is
-        -- a bit expensive. With larger_tap_area_to_follow_links=true,
-        -- this is done for each tap on screen (changing pages, showing
-        -- menu...). We might want to cache these links per page (and
-        -- clear that cache when page layout change).
-        -- If we care only about internal links, request them only
-        -- (and avoid that expensive segments work on external links)
+        -- Getting segments on a page with many internal links is a bit expensive.
+        -- With larger_tap_area_to_follow_links, this is done on every tap, page turn or not.
+        -- getPageLinks goes through the CRe call cache, so at least repeat calls are cheaper.
+        -- If we only care about internal links, we only request those.
+        -- That expensive segments work is always skipped on external links.
         local links = self.ui.document:getPageLinks(internal_links_only)
         if not links or #links == 0 then
             return
@@ -976,7 +1061,7 @@ function ReaderLink:onGoToPageLink(ges, internal_links_only, max_distance)
         -- coordinates, and our code below may miss or give the wrong first
         -- or nearest link...
         local pos_x, pos_y = ges.pos.x, ges.pos.y
-        local shortest_dist = nil
+        local shortest_dist
         for _, link in ipairs(links) do
             -- link.uri may be an empty string with some invalid links: ignore them
             if link.section or (link.uri and link.uri ~= "") then
@@ -1040,35 +1125,34 @@ function ReaderLink:onGoToPageLink(ges, internal_links_only, max_distance)
         end
         if shortest_dist then
             selected_distance2 = shortest_dist
-        end
-
-        if selected_link then
-            logger.dbg("nearest selected_link", selected_link)
-            -- Check a_xpointer is coherent, use it as from_xpointer only if it is
-            local from_xpointer = nil
-            if selected_link.a_xpointer and self:isXpointerCoherent(selected_link.a_xpointer) then
-                from_xpointer = selected_link.a_xpointer
+            if max_distance and selected_distance2 > max_distance^2 then
+                logger.dbg("nearest link is further than max distance, ignoring it")
+                selected_link = nil
+            else
+                logger.dbg("nearest selected_link", selected_link)
+                -- Check if a_xpointer is coherent, use it as from_xpointer only if it is
+                local from_xpointer = nil
+                if selected_link.a_xpointer and self:isXpointerCoherent(selected_link.a_xpointer) then
+                    from_xpointer = selected_link.a_xpointer
+                end
+                -- Make it a link as expected by onGotoLink
+                selected_link = {
+                    xpointer = selected_link.section or selected_link.uri,
+                    marker_xpointer = selected_link.section,
+                    from_xpointer = from_xpointer,
+                    -- (keep a_xpointer even if noncoherent, might be needed for
+                    -- footnote detection (better than nothing if noncoherent)
+                    a_xpointer = selected_link.a_xpointer,
+                    -- keep the link y position, so we can keep its highlight shown
+                    -- a bit more time if it was hidden by the footnote popup
+                    link_y = selected_link.link_y,
+                }
             end
-            -- Make it a link as expected by onGotoLink
-            selected_link = {
-                xpointer = selected_link.section or selected_link.uri,
-                marker_xpointer = selected_link.section,
-                from_xpointer = from_xpointer,
-                -- (keep a_xpointer even if incoherent, might be needed for
-                -- footnote detection (better than nothing if incoherent)
-                a_xpointer = selected_link.a_xpointer,
-                -- keep the link y position, so we can keep its highlight shown
-                -- a bit more time if it was hidden by the footnote popup
-                link_y = selected_link.link_y,
-            }
         end
     end
+
     if selected_link then
-        if max_distance and selected_distance2 and selected_distance2 > max_distance^2 then
-            logger.dbg("nearest link is further than max distance, ignoring it")
-        else
-            return self:onGotoLink(selected_link, false, isFootnoteLinkInPopupEnabled())
-        end
+        return self:onGotoLink(selected_link, false, isFootnoteLinkInPopupEnabled())
     end
 end
 
@@ -1136,8 +1220,8 @@ function ReaderLink:selectRelPageLink(rel)
         xpointer = selected_link.section or selected_link.uri,
         marker_xpointer = selected_link.section,
         from_xpointer = from_xpointer,
-        -- (keep a_xpointer even if incoherent, might be needed for
-        -- footnote detection (better than nothing if incoherent)
+        -- (keep a_xpointer even if noncoherent, might be needed for
+        -- footnote detection (better than nothing if noncoherent)
         a_xpointer = selected_link.a_xpointer,
         -- keep the link y position, so we can keep its highlight shown
         -- a bit more time if it was hidden by the footnote popup

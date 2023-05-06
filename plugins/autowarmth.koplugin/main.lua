@@ -52,14 +52,6 @@ local AutoWarmth = WidgetContainer:extend{
     fl_turned_off = nil -- true/false if someone (AutoWarmth, gesture ...) has toggled the frontlight
 }
 
--- get timezone offset in hours (including dst)
-function AutoWarmth:getTimezoneOffset()
-    local now_ts = os.time()
-    local utcdate   = os.date("!*t", now_ts)
-    local localdate = os.date("*t", now_ts)
-    return os.difftime(os.time(localdate), os.time(utcdate)) * (1/3600)
-end
-
 function AutoWarmth:init()
     self:onDispatcherRegisterActions()
     self.ui.menu:registerToMainMenu(self)
@@ -145,7 +137,9 @@ function AutoWarmth:onAutoWarmthMode()
     self:scheduleMidnightUpdate()
 end
 
-function AutoWarmth:leavePowerSavingState(from_resume)
+function AutoWarmth:_onResume()
+    logger.dbg("AutoWarmth: onResume")
+
     local resume_date = os.date("*t")
 
     -- check if resume and suspend are done on the same day
@@ -154,24 +148,14 @@ function AutoWarmth:leavePowerSavingState(from_resume)
 
         local now_s = SunTime:getTimeInSec(resume_date)
         self.sched_warmth_index = self.sched_warmth_index - 1 -- scheduleNextWarmth will check this
-        self:scheduleNextWarmthChange(from_resume)
+        self:scheduleNextWarmthChange(true)
         self:scheduleToggleFrontlight(now_s) -- reset user toggles at sun set or sun rise
         self:toggleFrontlight(now_s)
         -- Reschedule 1sec after midnight
         UIManager:scheduleIn(24*3600 + 1 - now_s, self.scheduleMidnightUpdate, self)
     else
-        self:scheduleMidnightUpdate(from_resume) -- resume is on the other day, do all calcs again
+        self:scheduleMidnightUpdate(true) -- resume is on the other day, do all calcs again
     end
-end
-
-function AutoWarmth:_onResume()
-    logger.dbg("AutoWarmth: onResume")
-    self:leavePowerSavingState(true)
-end
-
-function AutoWarmth:_onLeaveStandby()
-    logger.dbg("AutoWarmth: onLeaveStandby")
-    self:leavePowerSavingState(false)
 end
 
 function AutoWarmth:_onSuspend()
@@ -180,8 +164,6 @@ function AutoWarmth:_onSuspend()
     UIManager:unschedule(self.setWarmth)
     UIManager:unschedule(self.setFrontlight)
 end
-
-AutoWarmth._onEnterStandby = AutoWarmth._onSuspend
 
 function AutoWarmth:_onToggleNightMode()
     logger.dbg("AutoWarmth: onToggleNightMode")
@@ -228,8 +210,6 @@ end
 function AutoWarmth:setEventHandlers()
     self.onResume = self._onResume
     self.onSuspend = self._onSuspend
-    self.onEnterStandby = self._onEnterStandby
-    self.onLeaveStandby = self._onLeaveStandby
     if self.control_nightmode then
         self.onToggleNightMode = self._onToggleNightMode
         self.onSetNightMode = self._onToggleNightMode
@@ -242,8 +222,6 @@ end
 function AutoWarmth:clearEventHandlers()
     self.onResume = nil
     self.onSuspend = nil
-    self.onEnterStandby = nil
-    self.onLeaveStandby = nil
     self.onToggleNightMode = nil
     self.onSetNightMode = nil
     self.onToggleFrontlight = nil
@@ -256,6 +234,13 @@ function AutoWarmth:scheduleMidnightUpdate(from_resume)
     UIManager:unschedule(self.scheduleMidnightUpdate)
     UIManager:unschedule(self.setWarmth)
     UIManager:unschedule(self.setFrontlight)
+
+    -- Calculate current timezone of device, which might change due to daylight saving.
+    local timezone = SunTime:getTimezoneOffset()
+    if timezone ~= self.timezone then
+        G_reader_settings:saveSetting("autowarmth_timezone", self.timezone)
+        self.timezone = timezone
+    end
 
     SunTime:setPosition(self.location, self.latitude, self.longitude, self.timezone, self.altitude, true)
     SunTime:setAdvanced()
@@ -800,7 +785,7 @@ function AutoWarmth:getLocationMenu()
                 callback = function(lat, long)
                     self.latitude = lat
                     self.longitude = long
-                    self.timezone = self:getTimezoneOffset() -- use timezone of device
+                    self.timezone = SunTime:getTimezoneOffset() -- use timezone of device
                     G_reader_settings:saveSetting("autowarmth_latitude", self.latitude)
                     G_reader_settings:saveSetting("autowarmth_longitude", self.longitude)
                     G_reader_settings:saveSetting("autowarmth_timezone", self.timezone)
@@ -1042,7 +1027,7 @@ function AutoWarmth:getWarmthMenu()
             text_func = function()
                 if Device:hasNaturalLight() then
                     return T(_("Control: %1%2%3"), self.control_warmth and _("warmth") or "",
-                            self.control_warmth and self.control_nightmode and T(_(" %1 "), _("and")) or "",
+                            self.control_warmth and self.control_nightmode and T(" %1 ", _("and")) or "",
                             self.control_nightmode and _("night mode") or "")
                 else
                     return _("Control: night mode")

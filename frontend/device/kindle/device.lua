@@ -69,24 +69,6 @@ local function isWifiUp()
 end
 --]]
 
--- Faster lipc-less variant ;).
-local function isWifiUp()
-    -- Read carrier state from sysfs (so far, all Kindles appear to use wlan0)
-    -- NOTE: We can afford to use CLOEXEC, as devices too old for it don't support Wi-Fi anyway ;).
-    local file = io.open("/sys/class/net/wlan0/carrier", "re")
-
-    -- File only exists while Wi-Fi module is loaded.
-    if not file then
-        return false
-    end
-
-    -- 0 means not connected, 1 connected
-    local out = file:read("*number")
-    file:close()
-
-    return out == 1
-end
-
 --[[
 Test if a kindle device is flagged as a Special Offers device (i.e., ad supported) (FW >= 5.x)
 --]]
@@ -200,7 +182,12 @@ function Kindle:initNetworkManager(NetworkMgr)
         end
     end
 
-    NetworkMgr.isWifiOn = isWifiUp
+    function NetworkMgr:getNetworkInterfaceName()
+        return "wlan0" -- so far, all Kindles appear to use wlan0
+    end
+
+    NetworkMgr.isWifiOn = NetworkMgr.sysfsWifiOn
+    NetworkMgr.isConnected = NetworkMgr.ifHasAnAddress
 end
 
 function Kindle:supportsScreensaver()
@@ -261,9 +248,9 @@ function Kindle:setDateTime(year, month, day, hour, min, sec)
     else
         local command
         if year and month and day then
-            command = string.format("date -s '%d-%d-%d %d:%d:%d' '+%Y-%m-%d %H:%M:%S'", year, month, day, hour, min, sec)
+            command = string.format("date -s '%d-%d-%d %d:%d:%d' '+%%Y-%%m-%%d %%H:%%M:%%S'", year, month, day, hour, min, sec)
         else
-            command = string.format("date -s '%d:%d' '+%H:%M'", hour, min)
+            command = string.format("date -s '%d:%d' '+%%H:%%M'", hour, min)
         end
         if os.execute(command) == 0 then
             os.execute("hwclock -u -w")
@@ -739,6 +726,7 @@ function KindlePaperWhite2:init()
         fl_intensity_file = "/sys/class/backlight/max77696-bl/brightness",
         batt_capacity_file = "/sys/devices/system/wario_battery/wario_battery0/battery_capacity",
         is_charging_file = "/sys/devices/system/wario_charger/wario_charger0/charging",
+        hall_file = "/sys/devices/system/wario_hall/wario_hall0/hall_enable",
     }
 
     Kindle.init(self)
@@ -753,6 +741,7 @@ function KindleBasic:init()
         device = self,
         batt_capacity_file = "/sys/devices/system/wario_battery/wario_battery0/battery_capacity",
         is_charging_file = "/sys/devices/system/wario_charger/wario_charger0/charging",
+        hall_file = "/sys/devices/system/wario_hall/wario_hall0/hall_enable",
     }
 
     Kindle.init(self)
@@ -768,6 +757,7 @@ function KindleVoyage:init()
         fl_intensity_file = "/sys/class/backlight/max77696-bl/brightness",
         batt_capacity_file = "/sys/devices/system/wario_battery/wario_battery0/battery_capacity",
         is_charging_file = "/sys/devices/system/wario_charger/wario_charger0/charging",
+        hall_file = "/sys/devices/system/wario_hall/wario_hall0/hall_enable",
     }
     self.input = require("device/input"):new{
         device = self,
@@ -811,6 +801,13 @@ function KindleVoyage:init()
     self.input.open(self.touch_dev)
     self.input.open("/dev/input/event2") -- WhisperTouch
     self.input.open("fake_events")
+
+    -- reenable WhisperTouch keys when started without framework
+    if self.framework_lipc_handle then
+        self.framework_lipc_handle:set_int_property("com.lab126.deviced", "fsrkeypadEnable", 1)
+        self.framework_lipc_handle:set_int_property("com.lab126.deviced", "fsrkeypadPrevEnable", 1)
+        self.framework_lipc_handle:set_int_property("com.lab126.deviced", "fsrkeypadNextEnable", 1)
+    end
 end
 
 function KindlePaperWhite3:init()
@@ -820,6 +817,7 @@ function KindlePaperWhite3:init()
         fl_intensity_file = "/sys/class/backlight/max77696-bl/brightness",
         batt_capacity_file = "/sys/devices/system/wario_battery/wario_battery0/battery_capacity",
         is_charging_file = "/sys/devices/system/wario_charger/wario_charger0/charging",
+        hall_file = "/sys/devices/system/wario_hall/wario_hall0/hall_enable",
     }
 
     Kindle.init(self)
@@ -876,6 +874,7 @@ function KindleOasis:init()
         -- NOTE: Points to the embedded battery. The one in the cover is codenamed "soda".
         batt_capacity_file = "/sys/devices/system/wario_battery/wario_battery0/battery_capacity",
         is_charging_file = "/sys/devices/system/wario_charger/wario_charger0/charging",
+        hall_file = "/sys/devices/system/wario_hall/wario_hall0/hall_enable",
     }
 
     self.input = require("device/input"):new{
@@ -1136,6 +1135,7 @@ function KindleBasic2:init()
         batt_capacity_file = "/sys/class/power_supply/bd7181x_bat/capacity",
         is_charging_file = "/sys/class/power_supply/bd7181x_bat/charging",
         batt_status_file = "/sys/class/power_supply/bd7181x_bat/status",
+        hall_file = "/sys/devices/system/heisenberg_hall/heisenberg_hall0/hall_enable",
     }
 
     Kindle.init(self)
@@ -1152,6 +1152,7 @@ function KindlePaperWhite4:init()
         batt_capacity_file = "/sys/class/power_supply/bd71827_bat/capacity",
         is_charging_file = "/sys/class/power_supply/bd71827_bat/charging",
         batt_status_file = "/sys/class/power_supply/bd71827_bat/status",
+        hall_file = "/sys/bus/platform/drivers/hall_sensor/rex_hall/hall_enable",
     }
 
     Kindle.init(self)
@@ -1178,6 +1179,7 @@ function KindleBasic3:init()
         batt_capacity_file = "/sys/class/power_supply/bd71827_bat/capacity",
         is_charging_file = "/sys/class/power_supply/bd71827_bat/charging",
         batt_status_file = "/sys/class/power_supply/bd71827_bat/status",
+        hall_file = "/sys/bus/platform/drivers/hall_sensor/rex_hall/hall_enable",
     }
 
     Kindle.init(self)
@@ -1199,6 +1201,7 @@ function KindlePaperWhite5:init()
         batt_capacity_file = "/sys/class/power_supply/bd71827_bat/capacity",
         is_charging_file = "/sys/class/power_supply/bd71827_bat/charging",
         batt_status_file = "/sys/class/power_supply/bd71827_bat/status",
+        hall_file = "/sys/devices/platform/eink_hall/hall_enable",
     }
 
     -- Enable the so-called "fast" mode, so as to prevent the driver from silently promoting refreshes to REAGL.

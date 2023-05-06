@@ -21,7 +21,7 @@ local function isUrl(s)
 end
 
 local function isCommand(s)
-    return os.execute("which "..s.." >/dev/null 2>&1") == 0
+    return os.execute("command -v "..s.." >/dev/null") == 0
 end
 
 local function runCommand(command)
@@ -128,7 +128,6 @@ local Emulator = Device:extend{
     hasNaturalLight = yes,
     hasNaturalLightApi = yes,
     hasWifiToggle = yes,
-    hasWifiManager = yes,
     -- Not really, Device:reboot & Device:powerOff are not implemented, so we just exit ;).
     canPowerOff = yes,
     canReboot = yes,
@@ -367,6 +366,18 @@ function Device:setEventHandlers(UIManager)
     end
 end
 
+function Device:initNetworkManager(NetworkMgr)
+    function NetworkMgr:isWifiOn() return true end
+    function NetworkMgr:isConnected()
+        -- Pull the default gateway first, so we don't even try to ping anything if there isn't one...
+        local default_gw = Device:getDefaultRoute()
+        if not default_gw then
+            return false
+        end
+        return 0 == os.execute("ping -c1 -w2 " .. default_gw .. " > /dev/null")
+    end
+end
+
 function Emulator:supportsScreensaver() return true end
 
 function Emulator:simulateSuspend()
@@ -401,6 +412,7 @@ function Emulator:initNetworkManager(NetworkMgr)
     function NetworkMgr:isWifiOn()
         return G_reader_settings:nilOrTrue("emulator_fake_wifi_connected")
     end
+    NetworkMgr.isConnected = NetworkMgr.isWifiOn
 end
 
 io.write("Starting SDL in " .. SDL.getBasePath() .. "\n")

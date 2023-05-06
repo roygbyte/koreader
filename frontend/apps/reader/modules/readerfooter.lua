@@ -437,7 +437,6 @@ local ReaderFooter = WidgetContainer:extend{
     mode = MODE.page_progress,
     pageno = nil,
     pages = nil,
-    progress_percentage = 0.0,
     footer_text = nil,
     text_font_face = "ffont",
     height = Screen:scaleBySize(G_defaults:readSetting("DMINIBAR_CONTAINER_HEIGHT")),
@@ -496,6 +495,7 @@ ReaderFooter.default_settings = {
     progress_pct_format = "0",
     progress_margin = false,
     pages_left_includes_current_page = false,
+    initial_marker = false,
 }
 
 function ReaderFooter:init()
@@ -584,10 +584,11 @@ function ReaderFooter:init()
     self.progress_bar = ProgressWidget:new{
         width = nil,
         height = nil,
-        percentage = self.progress_percentage,
+        percentage = nil,
         tick_width = Screen:scaleBySize(self.settings.toc_markers_width),
         ticks = nil, -- ticks will be populated in self:updateFooterText
         last = nil, -- last will be initialized in self:updateFooterText
+        initial_pos_marker = self.settings.initial_marker,
     }
 
     if self.settings.progress_style_thin then
@@ -771,19 +772,23 @@ function ReaderFooter:unscheduleFooterAutoRefresh()
 end
 
 function ReaderFooter:shouldBeRepainted()
-    local n = 1
-    local widget = UIManager:getNthTopWidget(n)
-    while widget do
-        if widget.name == "ReaderUI" then
-            return true
-        elseif widget.covers_fullscreen or widget.covers_footer then
-            -- (e.g. the virtual keyboard sets widget_covers_footer == true)
-            return false
-        end
-        n = n + 1
-        widget = UIManager:getNthTopWidget(n)
+    if not self.view.footer_visible then
+        return false
     end
-    return false
+
+    local top_wg = UIManager:getTopmostVisibleWidget() or {}
+    if top_wg.name == "ReaderUI" then
+        -- No overlap possible, it's safe to request a targeted widget repaint
+        return true
+    elseif top_wg.covers_fullscreen or top_wg.covers_footer then
+        -- No repaint necessary at all
+        return false
+    end
+
+    -- The topmost visible widget might overlap with us, but dimen isn't reliable enough to do a proper bounds check
+    -- (as stuff often just sets it to the Screen dimensions),
+    -- so request a full ReaderUI repaint to avoid out-of-order repaints.
+    return true, true
 end
 
 function ReaderFooter:rescheduleFooterAutoRefreshIfNeeded()
@@ -794,7 +799,7 @@ function ReaderFooter:rescheduleFooterAutoRefreshIfNeeded()
             -- (We want to avoid the footer to be painted over a widget covering it - we would
             -- be fine refreshing it if the widget is not covering it, but this is hard to
             -- guess from here.)
-            self:onUpdateFooter(self.view.footer_visible and self:shouldBeRepainted())
+            self:onUpdateFooter(self:shouldBeRepainted())
 
             self:rescheduleFooterAutoRefreshIfNeeded() -- schedule (or not) next refresh
         end
@@ -840,7 +845,7 @@ function ReaderFooter:setupTouchZones()
             id = "readerfooter_tap",
             ges = "tap",
             screen_zone = footer_screen_zone,
-            handler = function(ges) return self:onTapFooter(ges) end,
+            handler = function(ges) return self:TapFooter(ges) end,
             overrides = {
                 "readerconfigmenu_ext_tap",
                 "readerconfigmenu_tap",
@@ -1013,7 +1018,7 @@ function ReaderFooter:addToMainMenu(menu_items)
             enabled_func = function()
                 return not self.view.flipping_visible
             end,
-            callback = function() self:onTapFooter(true) end,
+            callback = function() self:onToggleFooterMode() end,
         })
         settings_submenu_num = 2
     end
@@ -1836,6 +1841,17 @@ With this enabled, the current page is included, so the count goes from n to 1 i
                             },
                         },
                     },
+                    {
+                        text = _("Show initial position marker"),
+                        checked_func = function()
+                            return self.settings.initial_marker == true
+                        end,
+                        callback = function()
+                            self.settings.initial_marker = not self.settings.initial_marker
+                            self.progress_bar.initial_pos_marker = self.settings.initial_marker
+                            self:refreshFooter(true)
+                        end
+                    },
                 },
             },
             {
@@ -2102,42 +2118,42 @@ function ReaderFooter:getDataFromStatistics(title, pages)
     return title .. sec
 end
 
-function ReaderFooter:onUpdateFooter(force_repaint, force_recompute)
+function ReaderFooter:onUpdateFooter(force_repaint, full_repaint)
     if self.pageno then
-        self:updateFooterPage(force_repaint, force_recompute)
+        self:updateFooterPage(force_repaint, full_repaint)
     else
-        self:updateFooterPos(force_repaint, force_recompute)
+        self:updateFooterPos(force_repaint, full_repaint)
     end
 end
 
-function ReaderFooter:updateFooterPage(force_repaint, force_recompute)
+function ReaderFooter:updateFooterPage(force_repaint, full_repaint)
     if type(self.pageno) ~= "number" then return end
     if self.ui.document:hasHiddenFlows() then
         local flow = self.ui.document:getPageFlow(self.pageno)
         local page = self.ui.document:getPageNumberInFlow(self.pageno)
         local pages = self.ui.document:getTotalPagesInFlow(flow)
-        self.progress_bar.percentage = page / pages
+        self.progress_bar:setPercentage(page / pages)
     else
-        self.progress_bar.percentage = self.pageno / self.pages
+        self.progress_bar:setPercentage(self.pageno / self.pages)
     end
-    self:updateFooterText(force_repaint, force_recompute)
+    self:updateFooterText(force_repaint, full_repaint)
 end
 
-function ReaderFooter:updateFooterPos(force_repaint, force_recompute)
+function ReaderFooter:updateFooterPos(force_repaint, full_repaint)
     if type(self.position) ~= "number" then return end
-    self.progress_bar.percentage = self.position / self.doc_height
-    self:updateFooterText(force_repaint, force_recompute)
+    self.progress_bar:setPercentage(self.position / self.doc_height)
+    self:updateFooterText(force_repaint, full_repaint)
 end
 
 -- updateFooterText will start as a noop. After onReaderReady event is
 -- received, it will initialized as _updateFooterText below
-function ReaderFooter:updateFooterText(force_repaint, force_recompute)
+function ReaderFooter:updateFooterText(force_repaint, full_repaint)
 end
 
 -- only call this function after document is fully loaded
-function ReaderFooter:_updateFooterText(force_repaint, force_recompute)
+function ReaderFooter:_updateFooterText(force_repaint, full_repaint)
     -- footer is invisible, we need neither a repaint nor a recompute, go away.
-    if not self.view.footer_visible and not force_repaint and not force_recompute then
+    if not self.view.footer_visible and not force_repaint and not full_repaint then
         return
     end
     local text = self:genFooterText()
@@ -2199,8 +2215,8 @@ function ReaderFooter:_updateFooterText(force_repaint, force_recompute)
     if force_repaint then
         -- If there was a visibility change, notify ReaderView
         if self.visibility_change then
-            self.ui:handleEvent(Event:new("ReaderFooterVisibilityChange"))
             self.visibility_change = nil
+            self.ui:handleEvent(Event:new("ReaderFooterVisibilityChange"))
         end
 
         -- NOTE: Getting the dimensions of the widget is impossible without having drawn it first,
@@ -2215,7 +2231,7 @@ function ReaderFooter:_updateFooterText(force_repaint, force_recompute)
             refresh_dim.y = self._saved_screen_height - refresh_dim.h
         end
         -- If we're making the footer visible (or it already is), we don't need to repaint ReaderUI behind it
-        if self.view.footer_visible then
+        if self.view.footer_visible and not full_repaint then
             -- Unfortunately, it's not a modal (we never show() it), so it's not in the window stack,
             -- instead, it's baked inside ReaderUI, so it gets slightly trickier...
             -- NOTE: self.view.footer -> self ;).
@@ -2227,6 +2243,7 @@ function ReaderFooter:_updateFooterText(force_repaint, force_recompute)
                 return self.view.currently_scrolling and "fast" or "ui", self.footer_content.dimen
             end)
         else
+            -- If the footer is invisible or might be hidden behind another widget, we need to repaint the full ReaderUI stack.
             UIManager:setDirty(self.view.dialog, function()
                 return self.view.currently_scrolling and "fast" or "ui", refresh_dim
             end)
@@ -2349,12 +2366,7 @@ function ReaderFooter:onExitFlippingMode()
     self:rescheduleFooterAutoRefreshIfNeeded()
 end
 
-function ReaderFooter:onTapFooter(ges)
-    local ignore_lock = false
-    if ges == true then
-        ignore_lock = true
-        ges = nil
-    end
+function ReaderFooter:TapFooter(ges)
     if self.view.flipping_visible and ges then
         local pos = ges.pos
         local dimen = self.progress_bar.dimen
@@ -2366,9 +2378,12 @@ function ReaderFooter:onTapFooter(ges)
         self:onUpdateFooter(true)
         return true
     end
-    if self.has_no_mode or (self.settings.lock_tap and not ignore_lock) then
-        return
-    end
+    if self.settings.lock_tap then return end
+    return self:onToggleFooterMode()
+end
+
+function ReaderFooter:onToggleFooterMode()
+    if self.has_no_mode and self.settings.disable_progress_bar then return end
     if self.settings.all_at_once or self.has_no_mode then
         if self.mode >= 1 then
             self.mode = self.mode_list.off
@@ -2454,16 +2469,11 @@ function ReaderFooter:onOutOfScreenSaver()
     self:rescheduleFooterAutoRefreshIfNeeded()
 end
 
-function ReaderFooter:onLeaveStandby()
-    self:maybeUpdateFooter()
-    self:rescheduleFooterAutoRefreshIfNeeded()
-end
-
 function ReaderFooter:onSuspend()
     self:unscheduleFooterAutoRefresh()
+    -- Reset the initial marker
+    self.progress_bar.inital_percentage = nil
 end
-
-ReaderFooter.onEnterStandby = ReaderFooter.onSuspend
 
 function ReaderFooter:onCloseDocument()
     self:unscheduleFooterAutoRefresh()
@@ -2472,12 +2482,12 @@ end
 -- Used by event handlers that can trip without direct UI interaction...
 function ReaderFooter:maybeUpdateFooter()
     -- ...so we need to avoid stomping over unsuspecting widgets (usually, ScreenSaver).
-    self:onUpdateFooter(self.view.footer_visible and self:shouldBeRepainted())
+    self:onUpdateFooter(self:shouldBeRepainted())
 end
 
 -- is the same as maybeUpdateFooter
 function ReaderFooter:onFrontlightStateChanged()
-    self:onUpdateFooter(self.view.footer_visible and self:shouldBeRepainted())
+    self:onUpdateFooter(self:shouldBeRepainted())
 end
 
 function ReaderFooter:onNetworkConnected()
@@ -2520,6 +2530,10 @@ end
 
 function ReaderFooter:onTimeFormatChanged()
     self:refreshFooter(true, true)
+end
+
+function ReaderFooter:onCloseWidget()
+    self:free()
 end
 
 return ReaderFooter

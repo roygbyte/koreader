@@ -69,6 +69,9 @@ function ReaderCoptListener:onReadSettings(config)
 end
 
 function ReaderCoptListener:onConfigChange(option_name, option_value)
+    -- font_size and line_spacing are historically and sadly shared by both mupdf and cre reader modules,
+    -- but fortunately they can be distinguished by their different ranges
+    if (option_name == "font_size" or option_name == "line_spacing") and option_value < 5 then return end
     self.document.configurable[option_name] = option_value
     self.ui:handleEvent(Event:new("StartActivityIndicator"))
     return true
@@ -91,18 +94,18 @@ function ReaderCoptListener:onTimeFormatChanged()
 end
 
 function ReaderCoptListener:shouldHeaderBeRepainted()
-    local n = 1
-    local widget = UIManager:getNthTopWidget(n)
-    while widget do
-        if widget.name == "ReaderUI"  then
-            return true
-        elseif widget.covers_fullscreen then
-            return false
-        end
-        n = n + 1
-        widget = UIManager:getNthTopWidget(n)
+    local top_wg = UIManager:getTopmostVisibleWidget() or {}
+    if top_wg.name == "ReaderUI" then
+        -- We're on display, go ahead
+        return true
+    elseif top_wg.covers_fullscreen or top_wg.covers_header then
+        -- We're hidden behind something that definitely covers us, don't do anything
+        return false
+    else
+        -- There's something on top of us, but we might still be visible, request a ReaderUI repaint,
+        -- UIManager will sort it out.
+        return true
     end
-    return false
 end
 
 function ReaderCoptListener:updateHeader()
@@ -162,10 +165,6 @@ function ReaderCoptListener:onResume()
     self:headerRefresh()
 end
 
-function ReaderCoptListener:onLeaveStandby()
-    self:headerRefresh()
-end
-
 function ReaderCoptListener:onOutOfScreenSaver()
     if not self._delayed_screensaver then
         return
@@ -178,7 +177,6 @@ end
 -- Unschedule on these events
 ReaderCoptListener.onCloseDocument = ReaderCoptListener.unscheduleHeaderRefresh
 ReaderCoptListener.onSuspend = ReaderCoptListener.unscheduleHeaderRefresh
-ReaderCoptListener.onEnterStandby = ReaderCoptListener.unscheduleHeaderRefresh
 
 function ReaderCoptListener:setAndSave(setting, property, value)
     self.ui.document._document:setIntProperty(property, value)

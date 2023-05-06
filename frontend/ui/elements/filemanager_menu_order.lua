@@ -15,6 +15,7 @@ local order = {
         "----------------------------",
         "sort_by",
         "reverse_sorting",
+        "sort_mixed",
         "----------------------------",
         "start_with",
     },
@@ -36,6 +37,8 @@ local order = {
         -- end common settings
     },
     document = {
+        "document_metadata_location",
+        "document_metadata_location_move",
         "document_auto_save",
         "document_save",
         "document_end_action",
@@ -55,6 +58,7 @@ local order = {
         "autoshutdown",
         "ignore_sleepcover",
         "ignore_open_sleepcover",
+        "cover_events",
         "ignore_battery_optimizations",
         "mass_storage_settings", -- if Device:canToggleMassStorage()
         "file_ext_assoc",
@@ -135,6 +139,7 @@ local order = {
         "terminal",
         "----------------------------",
         "plugin_management",
+        "patch_management",
         "advanced_settings",
         "developer_options",
     },

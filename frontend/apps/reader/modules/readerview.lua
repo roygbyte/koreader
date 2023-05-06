@@ -190,6 +190,14 @@ function ReaderView:paintTo(bb, x, y)
         elseif self.view_mode == "scroll" then
             self:drawScrollView(bb, x, y)
         end
+        local should_repaint = self.ui.rolling:handlePartialRerendering()
+        if should_repaint then
+            -- ReaderRolling may have repositionned on another page containing
+            -- the xpointer of the top of the original page: recalling this is
+            -- all there is to do.
+            self:paintTo(bb, x, y)
+            return
+        end
     end
 
     -- dim last read area
@@ -225,10 +233,9 @@ function ReaderView:paintTo(bb, x, y)
     if self.footer_visible then
         self.footer:paintTo(bb, x, y)
     end
-    -- paint flipping or select mode sign
-    if self.flipping_visible or self.ui.highlight.select_mode then
-        self.flipping:paintTo(bb, x, y)
-    end
+    -- paint top left corner indicator
+    self.flipping:paintTo(bb, x, y)
+    -- paint view modules
     for _, m in pairs(self.view_modules) do
         m:paintTo(bb, x, y)
     end
@@ -250,7 +257,7 @@ function ReaderView:paintTo(bb, x, y)
         if img_count and img_count > 0 and img_coverage and img_coverage >= 0.075 then
             self.dialog.dithered = true
             -- Request a flashing update while we're at it, but only if it's the first time we're painting it
-            if self.state.drawn == false then
+            if self.state.drawn == false and G_reader_settings:nilOrTrue("refresh_on_pages_with_images") then
                 UIManager:setDirty(nil, "full")
             end
         end
@@ -968,19 +975,15 @@ end
 function ReaderView:onReaderFooterVisibilityChange()
     -- Don't bother ReaderRolling with this nonsense, the footer's height is NOT handled via visible_area there ;)
     if self.ui.paging and self.state.page then
-        -- NOTE: Simply relying on recalculate would be a wee bit too much: it'd reset the in-page offsets,
-        --       which would be wrong, and is also not necessary, since the footer is at the bottom of the screen ;).
-        --       So, simply mangle visible_area's height ourselves...
+        -- We don't need to do anything if reclaim is enabled ;).
         if not self.footer.settings.reclaim_height then
-            -- NOTE: Yes, this means that toggling reclaim_height requires a page switch (for a proper recalculate).
-            --       Thankfully, most of the time, the quirks are barely noticeable ;).
-            if self.footer_visible then
-                self.visible_area.h = self.visible_area.h - self.footer:getHeight()
-            else
-                self.visible_area.h = self.visible_area.h + self.footer:getHeight()
-            end
+            -- NOTE: Mimic what onSetFullScreen does, since, without reclaim, toggling the footer affects the available area,
+            --       so we need to recompute the full layout.
+            self.ui:handleEvent(Event:new("SetDimensions", Screen:getSize()))
+            -- NOTE: Scroll mode's behavior after this might be suboptimal (until next page),
+            --       but I'm not familiar enough with it to make it behave...
+            --       (e.g., RedrawCurrentPage & co will snap to the top of the "current" page).
         end
-        self.ui:handleEvent(Event:new("ViewRecalculate", self.visible_area, self.page_area))
     end
 end
 
@@ -1020,8 +1023,10 @@ function ReaderView:onSWDitheringUpdate(toggle)
 end
 
 function ReaderView:onFontSizeUpdate(font_size)
-    self.ui:handleEvent(Event:new("ReZoom", font_size))
-    Notification:notify(T(_("Font zoom set to: %1."), font_size))
+    if self.ui.paging then
+        self.ui:handleEvent(Event:new("ReZoom", font_size))
+        Notification:notify(T(_("Font zoom set to: %1."), font_size))
+    end
 end
 
 function ReaderView:onDefectSizeUpdate()
@@ -1158,9 +1163,7 @@ function ReaderView:onToggleReadingOrder()
     self.inverse_reading_order = not self.inverse_reading_order
     self:setupTouchZones()
     local is_rtl = self.inverse_reading_order ~= BD.mirroredUILayout() -- mirrored reading
-    UIManager:show(Notification:new{
-        text = is_rtl and _("RTL page turning.") or _("LTR page turning."),
-    })
+    Notification:notify(is_rtl and _("RTL page turning.") or _("LTR page turning."))
     return true
 end
 

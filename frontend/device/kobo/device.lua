@@ -30,31 +30,6 @@ local function koboEnableWifi(toggle)
     end
 end
 
--- NOTE: Cheap-ass way of checking if Wi-Fi seems to be enabled...
---       Since the crux of the issues lies in race-y module unloading, this is perfectly fine for our usage.
-local function koboIsWifiOn()
-    local needle = os.getenv("WIFI_MODULE") or "sdio_wifi_pwr"
-    local nlen = #needle
-    -- /proc/modules is usually empty, unless Wi-Fi or USB is enabled
-    -- We could alternatively check if lfs.attributes("/proc/sys/net/ipv4/conf/" .. os.getenv("INTERFACE"), "mode") == "directory"
-    -- c.f., also what Cervantes does via /sys/class/net/eth0/carrier to check if the interface is up.
-    -- That said, since we only care about whether *modules* are loaded, this does the job nicely.
-    local f = io.open("/proc/modules", "re")
-    if not f then
-        return false
-    end
-
-    local found = false
-    for haystack in f:lines() do
-        if haystack:sub(1, nlen) == needle then
-            found = true
-            break
-        end
-    end
-    f:close()
-    return found
-end
-
 -- checks if standby is available on the device
 local function checkStandby()
     logger.dbg("Kobo: checking if standby is possible ...")
@@ -70,25 +45,6 @@ local function checkStandby()
     end
     logger.dbg("Kobo: standby state is unsupported")
     return no
-end
-
-local function writeToSys(val, file)
-    -- NOTE: We do things by hand via ffi, because io.write uses fwrite,
-    --       which isn't a great fit for procfs/sysfs (e.g., we lose failure cases like EBUSY,
-    --       as it only reports failures to write to the *stream*, not to the disk/file!).
-    local fd = C.open(file, bit.bor(C.O_WRONLY, C.O_CLOEXEC)) -- procfs/sysfs, we shouldn't need O_TRUNC
-    if fd == -1 then
-        logger.err("Cannot open file `" .. file .. "`:", ffi.string(C.strerror(ffi.errno())))
-        return
-    end
-    local bytes = #val
-    local nw = C.write(fd, val, bytes)
-    if nw == -1 then
-        logger.err("Cannot write `" .. val .. "` to file `" .. file .. "`:", ffi.string(C.strerror(ffi.errno())))
-    end
-    C.close(fd)
-    -- NOTE: Allows the caller to possibly handle short writes (not that these should ever happen here).
-    return nw == bytes
 end
 
 -- Return the highest core number
@@ -144,6 +100,8 @@ local Kobo = Generic:extend{
     canPowerOff = yes,
     canSuspend = yes,
     supportsScreensaver = yes,
+    -- most Kobos are MT-capable
+    hasMultitouch = yes,
     -- most Kobos have X/Y switched for the touch screen
     touch_switch_xy = true,
     -- most Kobos have also mirrored X coordinates
@@ -155,7 +113,7 @@ local Kobo = Generic:extend{
     isAlwaysPortrait = yes,
     -- we don't need an extra refreshFull on resume, thank you very much.
     needsScreenRefreshAfterResume = no,
-    -- currently only the Aura One and Forma have coloured frontlights
+    -- some devices have coloured frontlights
     hasNaturalLight = no,
     hasNaturalLightMixer = no,
     -- HW inversion is generally safe on Kobo, except on a few boards/kernels
@@ -189,7 +147,7 @@ local Kobo = Generic:extend{
     -- Device ships with various hardware revisions under the same device code, requirign automatic hardware detection...
     automagic_sysfs = false,
 
-    unexpected_wakeup_count = 0
+    unexpected_wakeup_count = 0,
 }
 
 local KoboTrilogyA = Kobo:extend{
@@ -415,7 +373,7 @@ local KoboStorm = Kobo:extend{
     },
     -- NOTE: The Libra apparently suffers from a mysterious issue where completely innocuous WAIT_FOR_UPDATE_COMPLETE ioctls
     --       will mysteriously fail with a timeout (5s)...
-    --       This obviously leads to *terrible* user experience, so, until more is understood avout the issue,
+    --       This obviously leads to *terrible* user experience, so, until more is understood about the issue,
     --       bypass this ioctl on this device.
     --       c.f., https://github.com/koreader/koreader/issues/7340
     hasReliableMxcWaitFor = no,
@@ -472,6 +430,11 @@ local KoboCadmus = Kobo:extend{
         nl_min = 0,
         nl_max = 10,
         nl_inverted = false,
+        --- @note: The Sage natively ramps when setting the frontlight intensity.
+        ---        A side-effect of this behavior is that if you queue a series of intensity changes ending at 0,
+        ---        it won't ramp *at all*, and jump straight to zero.
+        ---        So we delay the final ramp off step to prevent (both) the native and our ramping from being optimized out
+        ramp_off_delay = 0.5,
     },
     boot_rota = C.FB_ROTATE_CW,
     battery_sysfs = "/sys/class/power_supply/battery",
@@ -480,6 +443,7 @@ local KoboCadmus = Kobo:extend{
     ntx_dev = "/dev/input/by-path/platform-ntx_event0-event",
     touch_dev = "/dev/input/by-path/platform-0-0010-event",
     isSMP = yes,
+    -- Much like the Libra 2, there are at least two different HW revisions, with different PMICs...
     automagic_sysfs = true,
 }
 
@@ -617,69 +581,59 @@ function Kobo:init()
     -- Automagic sysfs discovery
     if self.automagic_sysfs then
         -- Battery
-        if not self.battery_sysfs then
-            if util.pathExists("/sys/class/power_supply/battery") then
-                -- Newer devices (circa sunxi)
-                self.battery_sysfs = "/sys/class/power_supply/battery"
-            else
-                self.battery_sysfs = "/sys/class/power_supply/mc13892_bat"
-            end
+        if util.pathExists("/sys/class/power_supply/battery") then
+            -- Newer devices (circa sunxi)
+            self.battery_sysfs = "/sys/class/power_supply/battery"
+        else
+            self.battery_sysfs = "/sys/class/power_supply/mc13892_bat"
         end
 
         -- Frontlight
         if self:hasNaturalLight() then
-            if not self.frontlight_settings.frontlight_mixer then
-                if util.fileExists("/sys/class/leds/aw99703-bl_FL1/color") then
-                    -- HWConfig FL_PWM is AW99703x2
-                    self.frontlight_settings.frontlight_mixer = "/sys/class/leds/aw99703-bl_FL1/color"
-                elseif util.fileExists("/sys/class/backlight/lm3630a_led/color") then
-                    -- HWConfig FL_PWM is LM3630
-                    self.frontlight_settings.frontlight_mixer = "/sys/class/backlight/lm3630a_led/color"
-                elseif util.fileExists("/sys/class/backlight/tlc5947_bl/color") then
-                    -- HWConfig FL_PWM is TLC5947
-                    self.frontlight_settings.frontlight_mixer = "/sys/class/backlight/tlc5947_bl/color"
-                end
+            if util.fileExists("/sys/class/leds/aw99703-bl_FL1/color") then
+                -- HWConfig FL_PWM is AW99703x2
+                self.frontlight_settings.frontlight_mixer = "/sys/class/leds/aw99703-bl_FL1/color"
+            elseif util.fileExists("/sys/class/backlight/lm3630a_led/color") then
+                -- HWConfig FL_PWM is LM3630
+                self.frontlight_settings.frontlight_mixer = "/sys/class/backlight/lm3630a_led/color"
+            elseif util.fileExists("/sys/class/backlight/tlc5947_bl/color") then
+                -- HWConfig FL_PWM is TLC5947
+                self.frontlight_settings.frontlight_mixer = "/sys/class/backlight/tlc5947_bl/color"
             end
         end
 
         -- Touch panel input
-        if not self.touch_dev then
-            if util.fileExists("/dev/input/by-path/platform-1-0010-event") then
-                -- Elan (HWConfig TouchCtrl is ekth6) on i2c bus 1
-                self.touch_dev = "/dev/input/by-path/platform-1-0010-event"
-            elseif util.fileExists("/dev/input/by-path/platform-0-0010-event") then
-                -- Elan (HWConfig TouchCtrl is ekth6) on i2c bus 0
-                self.touch_dev = "/dev/input/by-path/platform-0-0010-event"
-            else
-                self.touch_dev = "/dev/input/event1"
-            end
+        if util.fileExists("/dev/input/by-path/platform-1-0010-event") then
+            -- Elan (HWConfig TouchCtrl is ekth6) on i2c bus 1
+            self.touch_dev = "/dev/input/by-path/platform-1-0010-event"
+        elseif util.fileExists("/dev/input/by-path/platform-0-0010-event") then
+            -- Elan (HWConfig TouchCtrl is ekth6) on i2c bus 0
+            self.touch_dev = "/dev/input/by-path/platform-0-0010-event"
+        else
+            self.touch_dev = "/dev/input/event1"
         end
 
         -- Physical buttons & synthetic NTX events
-        if not self.ntx_dev then
-            if util.fileExists("/dev/input/by-path/platform-gpio-keys-event") then
-                -- Libra 2 w/ a BD71828 PMIC
-                self.ntx_dev = "/dev/input/by-path/platform-gpio-keys-event"
-            elseif util.fileExists("/dev/input/by-path/platform-ntx_event0-event") then
-                -- sunxi & Mk. 7
-                self.ntx_dev = "/dev/input/by-path/platform-ntx_event0-event"
-            elseif util.fileExists("/dev/input/by-path/platform-mxckpd-event") then
-                -- circa Mk. 5 i.MX
-                self.ntx_dev = "/dev/input/by-path/platform-mxckpd-event"
-            else
-                self.ntx_dev = "/dev/input/event0"
-            end
+        if util.fileExists("/dev/input/by-path/platform-gpio-keys-event") then
+            -- Libra 2 w/ a BD71828 PMIC
+            self.ntx_dev = "/dev/input/by-path/platform-gpio-keys-event"
+        elseif util.fileExists("/dev/input/by-path/platform-ntx_event0-event") then
+            -- sunxi & Mk. 7
+            self.ntx_dev = "/dev/input/by-path/platform-ntx_event0-event"
+        elseif util.fileExists("/dev/input/by-path/platform-mxckpd-event") then
+            -- circa Mk. 5 i.MX
+            self.ntx_dev = "/dev/input/by-path/platform-mxckpd-event"
+        else
+            self.ntx_dev = "/dev/input/event0"
         end
 
         -- Power button (this usually ends up in ntx_dev, except with some PMICs)
-        if not self.power_dev then
-            if util.fileExists("/dev/input/by-path/platform-bd71828-pwrkey-event") then
-                -- Libra 2 w/ a BD71828 PMIC
-                self.power_dev = "/dev/input/by-path/platform-bd71828-pwrkey-event"
-            elseif util.fileExists("/dev/input/by-path/platform-bd71828-pwrkey.4.auto-event") then
-                -- Sage w/ a BD71828 PMIC
-                self.power_dev = "/dev/input/by-path/platform-bd71828-pwrkey.4.auto-event"
-            end
+        if util.fileExists("/dev/input/by-path/platform-bd71828-pwrkey-event") then
+            -- Libra 2 w/ a BD71828 PMIC
+            self.power_dev = "/dev/input/by-path/platform-bd71828-pwrkey-event"
+        elseif util.fileExists("/dev/input/by-path/platform-bd71828-pwrkey.4.auto-event") then
+            -- Sage w/ a BD71828 PMIC
+            self.power_dev = "/dev/input/by-path/platform-bd71828-pwrkey.4.auto-event"
         end
     end
 
@@ -761,7 +715,13 @@ function Kobo:init()
         dodgy_rtc = dodgy_rtc,
     }
 
+    -- Input handling on Kobo is a thing of nightmares, start by setting up the actual evdev handler...
+    self:setTouchEventHandler()
+    -- And then handle the extra shenanigans if necessary.
+    self:initEventAdjustHooks()
+
     -- Let generic properly setup the standard stuff
+    -- (*after* we've set our input hooks, so that the viewport translation runs last).
     Generic.init(self)
 
     -- Various HW Buttons, Switches & Synthetic NTX events
@@ -779,11 +739,6 @@ function Kobo:init()
     -- fake_events is only used for usb plug & charge events so far (generated via uevent, c.f., input/iput-kobo.h in base).
     -- NOTE: usb hotplug event is also available in /tmp/nickel-hardware-status (... but only when Nickel is running ;p)
     self.input.open("fake_events")
-
-    -- Input handling on Kobo is a thing of nightmares, start by setting up the actual evdev handler...
-    self:setTouchEventHandler()
-    -- And then handle the extra shenanigans if necessary.
-    self:initEventAdjustHooks()
 
     -- See if the device supports key repeat
     if not self:getKeyRepeat() then
@@ -860,10 +815,7 @@ function Kobo:initNetworkManager(NetworkMgr)
         self:reconnectOrShowNetworkMenu(complete_callback)
     end
 
-    local net_if = os.getenv("INTERFACE")
-    if not net_if then
-        net_if = "eth0"
-    end
+    local net_if = os.getenv("INTERFACE") or "eth0"
     function NetworkMgr:getNetworkInterfaceName()
         return net_if
     end
@@ -882,7 +834,17 @@ function Kobo:initNetworkManager(NetworkMgr)
         os.execute("./restore-wifi-async.sh")
     end
 
-    NetworkMgr.isWifiOn = koboIsWifiOn
+    NetworkMgr.isWifiOn = NetworkMgr.sysfsWifiOn
+    NetworkMgr.isConnected = NetworkMgr.ifHasAnAddress
+    -- Usually handled in NetworkMgr:init, but we'll need it *now*
+    NetworkMgr.interface = net_if
+
+    -- Kill Wi-Fi if NetworkMgr:isWifiOn() and NOT NetworkMgr:isConnected()
+    -- (i.e., if the launcher left the Wi-Fi in an inconsistent state: modules loaded, but no route to gateway).
+    if NetworkMgr:isWifiOn() and not NetworkMgr:isConnected() then
+        logger.info("Kobo Wi-Fi: Left in an inconsistent state by launcher!")
+        NetworkMgr:turnOffWifi()
+    end
 end
 
 function Kobo:setTouchEventHandler()
@@ -1065,7 +1027,7 @@ function Kobo:standby(max_duration)
     --[[
     -- On most devices, attempting to PM with a Wi-Fi module loaded will horribly crash the kernel, so, don't?
     -- NOTE: Much like suspend, our caller should ensure this never happens, hence this being commented out ;).
-    if koboIsWifiOn() then
+    if NetworkMgr:isWifiOn() then
         -- AutoSuspend relies on NetworkMgr:getWifiState to prevent this, so, if we ever trip this, it's a bug ;).
         logger.err("Kobo standby: cannot standby with Wi-Fi modules loaded! (NetworkMgr is confused: this is a bug)")
         return
@@ -1083,7 +1045,7 @@ function Kobo:standby(max_duration)
     logger.dbg("Kobo standby: asking to enter standby . . .")
     local standby_time = time.boottime_or_realtime_coarse()
 
-    local ret = writeToSys("standby", "/sys/power/state")
+    local ret = util.writeToSysfs("standby", "/sys/power/state")
 
     self.last_standby_time = time.boottime_or_realtime_coarse() - standby_time
     self.total_standby_time = self.total_standby_time + self.last_standby_time
@@ -1159,7 +1121,7 @@ function Kobo:suspend()
     -- NOTE: Sets gSleep_Mode_Suspend to 1. Used as a flag throughout the
     --       kernel to suspend/resume various subsystems
     --       c.f., state_extended_store @ kernel/power/main.c
-    local ret = writeToSys("1", "/sys/power/state-extended")
+    local ret = util.writeToSysfs("1", "/sys/power/state-extended")
     if ret then
         logger.dbg("Kobo suspend: successfully asked the kernel to put subsystems to sleep")
     else
@@ -1193,7 +1155,7 @@ function Kobo:suspend()
     logger.dbg("Kobo suspend: asking for a suspend to RAM . . .")
     local suspend_time = time.boottime_or_realtime_coarse()
 
-    ret = writeToSys("mem", "/sys/power/state")
+    ret = util.writeToSysfs("mem", "/sys/power/state")
 
     -- NOTE: At this point, we *should* be in suspend to RAM, as such,
     --       execution should only resume on wakeup...
@@ -1208,7 +1170,7 @@ function Kobo:suspend()
     else
         logger.warn("Kobo suspend: the kernel refused to enter suspend!")
         -- Reset state-extended back to 0 since we are giving up.
-        writeToSys("0", "/sys/power/state-extended")
+        util.writeToSysfs("0", "/sys/power/state-extended")
         if G_reader_settings:isTrue("pm_debug_entry_failure") then
             self:toggleChargingLED(true)
         end
@@ -1257,7 +1219,7 @@ function Kobo:resume()
     --       kernel to suspend/resume various subsystems
     --       cf. kernel/power/main.c @ L#207
     --       Among other things, this sets up the wakeup pins (e.g., resume on input).
-    local ret = writeToSys("0", "/sys/power/state-extended")
+    local ret = util.writeToSysfs("0", "/sys/power/state-extended")
     if ret then
         logger.dbg("Kobo resume: successfully asked the kernel to resume subsystems")
     else
@@ -1273,7 +1235,7 @@ function Kobo:resume()
         -- c.f., neo_ctl @ drivers/input/touchscreen/zforce_i2c.c,
         -- basically, a is wakeup (for activate), d is sleep (for deactivate), and we don't care about s (set res),
         -- and l (led signal level, actually a NOP on NTX kernels).
-        writeToSys("a", self.hasIRGridSysfsKnob)
+        util.writeToSysfs("a", self.hasIRGridSysfsKnob)
     end
 
     -- A full suspend may have toggled the LED off.
@@ -1297,8 +1259,13 @@ function Kobo:powerOff()
     -- Much like Nickel itself, disable the RTC alarm before powering down.
     self.wakeup_mgr:unsetWakeupAlarm()
 
-    -- Then shut down without init's help
-    os.execute("sleep 1 && poweroff -f &")
+    if self:isSunxi() then
+        -- On sunxi, apparently, we *do* go through init
+        os.execute("sleep 1 && poweroff &")
+    else
+        -- Then shut down without init's help
+        os.execute("sleep 1 && poweroff -f &")
+    end
 end
 
 function Kobo:reboot()
@@ -1381,16 +1348,16 @@ function Kobo:enableCPUCores(amount)
             up = "1"
         end
 
-        writeToSys(up, path)
+        util.writeToSysfs(up, path)
     end
 end
 
 function Kobo:performanceCPUGovernor()
-    writeToSys("performance", self.cpu_governor_knob)
+    util.writeToSysfs("performance", self.cpu_governor_knob)
 end
 
 function Kobo:defaultCPUGovernor()
-    writeToSys(self.default_cpu_governor, self.cpu_governor_knob)
+    util.writeToSysfs(self.default_cpu_governor, self.cpu_governor_knob)
 end
 
 function Kobo:isStartupScriptUpToDate()
@@ -1535,7 +1502,7 @@ elseif codename == "trilogy" and product_id == "310" then
     -- This is where things get interesting...
     -- The early 'A' variant (the actual model name being N905, without any letter suffix, unlike the two other variants)
     -- does *NOT* feature an internal SD card, and is manufactured in China instead of Taiwan... because it is *NOT* an NTX board.
-    -- c.f., #9742
+    -- cf. https://github.com/koreader/koreader/issues/9742
     if os.getenv("PLATFORM") == "freescale" then
         return KoboTrilogyA
     else

@@ -10,18 +10,6 @@ local T = require("ffi/util").template
 
 local DeviceListener = EventListener:extend{}
 
-local function _setSetting(name)
-    G_reader_settings:makeTrue(name)
-end
-
-local function _unsetSetting(name)
-    G_reader_settings:delSetting(name)
-end
-
-local function _toggleSetting(name)
-    G_reader_settings:flipNilOrFalse(name)
-end
-
 function DeviceListener:onToggleNightMode()
     local night_mode = G_reader_settings:isTrue("night_mode")
     Screen:toggleNightMode()
@@ -198,14 +186,18 @@ if Device:hasFrontlight() then
 
     function DeviceListener:onToggleFrontlight()
         local powerd = Device:getPowerDevice()
-        powerd:toggleFrontlight()
         local new_text
         if powerd.is_fl_on then
-            new_text = _("Frontlight enabled.")
-        else
             new_text = _("Frontlight disabled.")
+        else
+            new_text = _("Frontlight enabled.")
         end
-        Notification:notify(new_text)
+        -- We defer displaying the Notification to PowerD, as the toggle may be a ramp, and we both want to make sure the refresh fencing won't affect it, and that we only display the Notification at the end...
+        local notif_source = Notification.notify_source
+        local notif_cb = function()
+            Notification:notify(new_text, notif_source)
+        end
+        powerd:toggleFrontlight(notif_cb)
     end
 
     function DeviceListener:onShowFlDialog()
@@ -216,7 +208,7 @@ end
 
 if Device:hasGSensor() then
     function DeviceListener:onToggleGSensor()
-        _toggleSetting("input_ignore_gsensor")
+        G_reader_settings:flipNilOrFalse("input_ignore_gsensor")
         Device:toggleGSensor(not G_reader_settings:isTrue("input_ignore_gsensor"))
         local new_text
         if G_reader_settings:isTrue("input_ignore_gsensor") then
@@ -284,30 +276,42 @@ end
 
 function DeviceListener:onSetFlashOnChapterBoundaries(toggle)
     if toggle == true then
-        _setSetting("refresh_on_chapter_boundaries")
+        G_reader_settings:makeTrue("refresh_on_chapter_boundaries")
     else
-        _unsetSetting("refresh_on_chapter_boundaries")
+        G_reader_settings:delSetting("refresh_on_chapter_boundaries")
     end
 end
 
 function DeviceListener:onToggleFlashOnChapterBoundaries()
-    _toggleSetting("refresh_on_chapter_boundaries")
+    G_reader_settings:flipNilOrFalse("refresh_on_chapter_boundaries")
 end
 
 function DeviceListener:onSetNoFlashOnSecondChapterPage(toggle)
     if toggle == true then
-        _setSetting("no_refresh_on_second_chapter_page")
+        G_reader_settings:makeTrue("no_refresh_on_second_chapter_page")
     else
-        _unsetSetting("no_refresh_on_second_chapter_page")
+        G_reader_settings:delSetting("no_refresh_on_second_chapter_page")
     end
 end
 
 function DeviceListener:onToggleNoFlashOnSecondChapterPage()
-    _toggleSetting("no_refresh_on_second_chapter_page")
+    G_reader_settings:flipNilOrFalse("no_refresh_on_second_chapter_page")
+end
+
+function DeviceListener:onSetFlashOnPagesWithImages(toggle)
+    if toggle == true then
+        G_reader_settings:delSetting("refresh_on_pages_with_images")
+    else
+        G_reader_settings:makeFalse("refresh_on_pages_with_images")
+    end
+end
+
+function DeviceListener:onToggleFlashOnPagesWithImages()
+    G_reader_settings:flipNilOrTrue("refresh_on_pages_with_images")
 end
 
 function DeviceListener:onSwapPageTurnButtons()
-    _toggleSetting("input_invert_page_turn_keys")
+    G_reader_settings:flipNilOrFalse("input_invert_page_turn_keys")
     Device:invertButtons()
 end
 

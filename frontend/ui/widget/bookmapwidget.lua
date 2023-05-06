@@ -1,5 +1,6 @@
 local BD = require("ui/bidi")
 local Blitbuffer = require("ffi/blitbuffer")
+local ButtonDialog = require("ui/widget/buttondialog")
 local CenterContainer = require("ui/widget/container/centercontainer")
 local Device = require("device")
 local Font = require("ui/font")
@@ -303,6 +304,7 @@ function BookMapRow:init()
     self.indicators = {}
     self.bottom_texts = {}
     local prev_page_was_read = true -- avoid one at start of row
+    local extended_marker_h = math.ceil(self.span_height * 0.3)
     local unread_marker_h = math.ceil(self.span_height * 0.05)
     local read_min_h = math.max(math.ceil(self.span_height * 0.1), unread_marker_h+Size.line.thick)
     if self.page_slot_width >= 5 * unread_marker_h then
@@ -357,6 +359,35 @@ function BookMapRow:init()
                 })
             end
             prev_page_was_read = false
+        end
+        -- Extended separators below the baseline if requested (by PageBrowser
+        -- to show the start of thumbnail rows)
+        if self.extended_sep_pages and self.extended_sep_pages[page] then
+            local w = Size.line.thin
+            local x
+            if _mirroredUI then
+                x = self:getPageX(page, true) - w
+            else
+                x = self:getPageX(page)
+            end
+            local y = self.pages_frame_height - self.pages_frame_border
+            table.insert(self.pages_markers, {
+                x = x, y = y,
+                w = w, h = extended_marker_h,
+                color = Blitbuffer.COLOR_BLACK,
+            })
+        end
+        -- Add a little spike below the baseline above each page number displayed, so we
+        -- can more easily associate the (possibly wider) page number to its page slot.
+        if self.page_texts and self.page_texts[page] then
+            local w = Screen:scaleBySize(2)
+            local x = math.floor((self:getPageX(page) + self:getPageX(page, true) + 0.5)/2 - w/2)
+            local y = self.pages_frame_height - self.pages_frame_border + 2
+            table.insert(self.pages_markers, {
+                x = x, y = y,
+                w = w, h = math.ceil(w*1.5),
+                color = Blitbuffer.COLOR_BLACK,
+            })
         end
         -- Indicator for bookmark/highlight type, and current page
         if self.bookmarked_pages[page] then
@@ -609,8 +640,8 @@ function BookMapWidget:init()
     self.title_bar = TitleBar:new{
         fullscreen = true,
         title = self.title,
-        left_icon = "info",
-        left_icon_tap_callback = function() self:showHelp() end,
+        left_icon = "appbar.menu",
+        left_icon_tap_callback = function() self:showMenu() end,
         left_icon_hold_callback = function()
             self:toggleDefaultSettings() -- toggle between user settings and default view
         end,
@@ -1018,14 +1049,119 @@ function BookMapWidget:update()
 end
 
 
-function BookMapWidget:showHelp()
+function BookMapWidget:showMenu()
+    local button_dialog
+    -- Width of our -/+ buttons, so it looks fine with Button's default font size of 20
+    local plus_minus_width = Screen:scaleBySize(60)
+    local buttons = {
+        {{
+            text = _("About book map"),
+            align = "left",
+            callback = function()
+                self:showAbout()
+            end,
+        }},
+        {{
+            text = _("Available gestures"),
+            align = "left",
+            callback = function()
+                self:showGestures()
+            end,
+        }},
+        {{
+            text = _("Switch current/initial views"),
+            align = "left",
+            enabled_func = function() return self.toc_depth > 0 end,
+            callback = function()
+                self:toggleDefaultSettings()
+            end,
+        }},
+        {{
+            text = _("Switch grid/flat views"),
+            align = "left",
+            enabled_func = function() return self.toc_depth > 0 end,
+            callback = function()
+                self.flat_map = not self.flat_map
+                self:saveSettings()
+                self:update()
+            end,
+        }},
+        {
+            {
+                text = _("Chapters"),
+                callback = function() end,
+                align = "left",
+            },
+            {
+                text = "\u{2796}", -- Heavy minus sign
+                enabled_func = function() return self.toc_depth > 0 end,
+                callback = function()
+                    if self:updateTocDepth(self.flat_map and 1 or -1, nil) then
+                        self:update()
+                    end
+                end,
+                width = plus_minus_width,
+            },
+            {
+                text = "\u{2795}", -- Heavy plus sign
+                enabled_func = function() return self.toc_depth < self.max_toc_depth end,
+                callback = function()
+                    if self:updateTocDepth(self.flat_map and -1 or 1, nil) then
+                        self:update()
+                    end
+                end,
+                width = plus_minus_width,
+            }
+        },
+        {
+            {
+                text = _("Page slot width"),
+                callback = function() end,
+                align = "left",
+                -- Below, minus increases page per row and plus decreases it.
+                -- It feels more natural this way: + will make everything (page slots and the grid) bigger.
+            },
+            {
+                text = "\u{2796}", -- Heavy minus sign
+                enabled_func = function() return self.pages_per_row < self.max_pages_per_row end,
+                callback = function()
+                    if self:updatePagesPerRow(10, true) then
+                        self:update()
+                    end
+                end,
+                width = plus_minus_width,
+            },
+            {
+                text = "\u{2795}", -- Heavy plus sign
+                enabled_func = function() return self.pages_per_row > self.min_pages_per_row end,
+                callback = function()
+                    if self:updatePagesPerRow(-10, true) then
+                        self:update()
+                    end
+                end,
+                width = plus_minus_width,
+            }
+        },
+    }
+    button_dialog = ButtonDialog:new{
+        -- width = math.floor(Screen:getWidth() / 2),
+        width = math.floor(Screen:getWidth() * 0.9), -- max width, will get smaller
+        shrink_unneeded_width = true,
+        buttons = buttons,
+        anchor = function()
+            return self.title_bar.left_button.image.dimen
+        end,
+    }
+    UIManager:show(button_dialog)
+end
+function BookMapWidget:showAbout()
     UIManager:show(InfoMessage:new{
         text = _([[
 Book map displays an overview of the book content.
 
-If statistics are enabled, black bars are shown for already read pages (gray for pages read in the current reading session). Their heights vary with the time spent reading the page.
-Chapters are shown above their pages.
-Under the pages can be found some indicators:
+If statistics are enabled, black bars are shown for already read pages (gray for pages read in the current reading session). Their heights vary depending on the time spent reading the page.
+Chapters are shown above the pages they encompass.
+Under the pages, these indicators may be shown:
 ▲ current page
 ❶ ❷ … previous locations
 ▒ highlighted text
@@ -1033,14 +1169,24 @@ Under the pages can be found some indicators:
  bookmarked page
 ▢ focused page when coming from Pages browser
 
-Tap on a location in the book to browse thumbnails of the pages there.
-Swipe along the left screen edge to change the level of chapters to include in the book map, and the type of book map (grid or flat) when crossing the level 0.
-Swipe along the bottom screen edge to change the width of page slots.
-Swipe or pan vertically on content to scroll.
-Any multiswipe will close the book map.
+On a newly opened book, the book map will start in grid mode showing all chapter levels, fitting on a single screen, to give the best initial overview of the book's content.]]),
+    })
+end
 
-On a newly opened book, the book map will start in grid mode showing all chapter levels, fitting on a single screen, to give the best initial overview of the book's content.
-Long-press on ⓘ to switch between current and initial views.]]),
+function BookMapWidget:showGestures()
+    UIManager:show(InfoMessage:new{
+        text = _([[
+Tap on a location in the book to browse thumbnails of the pages there.
+
+Swipe along the left screen edge to change the level of chapters to include in the book map, and the type of book map (grid or flat) when crossing the level 0.
+
+Swipe along the bottom screen edge to change the width of page slots.
+
+Swipe or pan vertically on content to scroll.
+
+Long-press on ≡ to switch between current and initial views.
+
+Any multiswipe will close the book map.]]),
     })
 end
 
