@@ -30,7 +30,7 @@ local Wikipedia = {
        generator = "search",
        gsrnamespace = "0",
        -- gsrsearch = nil, -- text to lookup, will be added below
-       gsrlimit = 20, -- max nb of results to get
+       gsrlimit = 30, -- max nb of results to get
        exlimit = "max",
        prop = "extracts|info|pageimages", -- 'extracts' to get text, 'info' to get full page length
        format = "json",
@@ -58,6 +58,7 @@ local Wikipedia = {
        prop = "text|sections|displaytitle|revid",
        -- page = nil, -- text to lookup, will be added below
        -- disabletoc = "", -- if we want to remove toc IN html
+            -- 20230722: there is no longer the TOC in the html no matter this param
        disablelimitreport = "",
        disableeditsection = "",
    },
@@ -306,14 +307,15 @@ function Wikipedia:getFullPageImages(wiki_title, lang)
         local wiki_base_url = self:getWikiServer(lang)
 
         local thumbs = {} -- bits of HTML containing an image
-        -- We first try to catch images in <div class=thumbinner>, which should exclude
-        -- wikipedia icons, flags... These seem to all end with a double </div>.
-        for thtml in html:gmatch([[<div class="thumbinner".-</div>%s*</div>]]) do
+        -- We first try to catch images in <figure>, which should exclude
+        -- wikipedia icons, flags...
+        -- (We want to match both typeof="mw:File/Thumb" and typeof="mw:File/Frame", so this [TF][hr][ua]m[be]...
+        for thtml in html:gmatch([[<figure [^>]*typeof="mw:File/[TF][hr][ua]m[be]"[^>]*>.-</figure>]]) do
             table.insert(thumbs, thtml)
         end
         -- We then also try to catch images in galleries (which often are less
         -- interesting than those in thumbinner) as a 2nd set.
-        for thtml in html:gmatch([[<li class="gallerybox".-<div class="thumb".-</div>%s*</div>%s*<div class="gallerytext">.-</div>%s*</div>]]) do
+        for thtml in html:gmatch([[<li class="gallerybox".-<div class="thumb".-</div>%s*<div class="gallerytext">.-</div>]]) do
             table.insert(thumbs, thtml)
         end
         -- We may miss some interesting images in the page's top right table, but
@@ -322,7 +324,7 @@ function Wikipedia:getFullPageImages(wiki_title, lang)
         for _, thtml in ipairs(thumbs) do
             -- We get <a href="/wiki/File:real_file_name.jpg (or /wiki/Fichier:real_file_name.jpg
             -- depending on Wikipedia lang)
-            local filename = thtml:match([[<a href="/wiki/[^:]*:([^"]*)" class="image"]])
+            local filename = thtml:match([[<a href="/wiki/[^:]*:([^"]*)" class="mw.file.description"]])
             if filename then
                 filename = url.unescape(filename)
             end
@@ -544,17 +546,17 @@ end
 -- These chosen ones are available in most fonts (prettier symbols
 -- exist in unicode, but are available in a few fonts only) and
 -- have a quite consistent size/weight in all fonts.
-local th1_sym = "\xE2\x96\x88"         -- full block (big black rectangle) (never met, only for web page title?)
-local th2_sym = "\xE2\x96\x89"         -- big black square
-local th3_sym = "\xC2\xA0\xE2\x97\xA4" -- black upper left triangle (indented, nicer)
-local th4_sym = "\xE2\x97\x86"         -- black diamond
-local th5_sym = "\xE2\x9C\xBF"         -- black florette
-local th6_sym = "\xE2\x9D\x96"         -- black diamond minus white x
+local th1_sym = "\u{2588}"         -- full block (big black rectangle) (never met, only for web page title?)
+local th2_sym = "\u{2589}"         -- big black square
+local th3_sym = "\u{00A0}\u{25E4}" -- black upper left triangle (indented, nicer)
+local th4_sym = "\u{25C6}"         -- black diamond
+local th5_sym = "\u{273F}"         -- black florette
+local th6_sym = "\u{2756}"         -- black diamond minus white x
 -- Others available in most fonts
--- local thX_sym = "\xE2\x9C\x9A"         -- heavy greek cross
--- local thX_sym = "\xE2\x97\xA2"         -- black lower right triangle
--- local thX_sym = "\xE2\x97\x89"         -- fish eye
--- local thX_sym = "\xE2\x96\x97"         -- quadrant lower right
+-- local thX_sym = "\u{271A}"         -- heavy greek cross
+-- local thX_sym = "\u{25E2}"         -- black lower right triangle
+-- local thX_sym = "\u{25C9}"         -- fish eye
+-- local thX_sym = "\u{2597}"         -- quadrant lower right
 
 -- For optional prettification of the plain text full page
 function Wikipedia:prettifyText(text)
@@ -569,7 +571,7 @@ function Wikipedia:prettifyText(text)
     text = text:gsub("==$", "==\n")        -- for a </hN> at end of text to be matched by next gsub
     text = text:gsub(" ===?\n+", "\n\n")   -- </h2> to </h3> : empty line after
     text = text:gsub(" ====+\n+", "\n")    -- </h4> to </hN> : single \n, no empty line
-    text = text:gsub("\n\n+\xE2\x80\x94", "\n\xE2\x80\x94") -- em dash, used for quote author, make it stick to prev text
+    text = text:gsub("\n\n+\u{2014}", "\n\u{2014}") -- em dash, used for quote author, make it stick to prev text
     text = text:gsub("\n +\n", "\n")  -- trim lines full of only spaces (often seen in math formulas)
     text = text:gsub("^\n*", "")      -- trim new lines at start
     text = text:gsub("\n*$", "")      -- trim new lines at end
@@ -585,17 +587,17 @@ end
 -- These chosen ones are available in most fonts (prettier symbols
 -- exist in unicode, but are available in a few fonts only) and
 -- have a quite consistent size/weight in all fonts.
-local h1_sym = "\xE2\x96\x88"     -- full block (big black rectangle) (never met, only for web page title?)
-local h2_sym = "\xE2\x96\x89"     -- big black square
-local h3_sym = "\xE2\x97\xA4"     -- black upper left triangle
-local h4_sym = "\xE2\x97\x86"     -- black diamond
-local h5_sym = "\xE2\x9C\xBF"     -- black florette
-local h6_sym = "\xE2\x9D\x96"     -- black diamond minus white x
+local h1_sym = "\u{2588}"     -- full block (big black rectangle) (never met, only for web page title?)
+local h2_sym = "\u{2589}"     -- big black square
+local h3_sym = "\u{25E4}"     -- black upper left triangle
+local h4_sym = "\u{25C6}"     -- black diamond
+local h5_sym = "\u{273F}"     -- black florette
+local h6_sym = "\u{2756}"     -- black diamond minus white x
 -- Other available ones in most fonts
--- local hXsym = "\xE2\x9C\x9A"     -- heavy greek cross
--- local hXsym = "\xE2\x97\xA2"     -- black lower right triangle
--- local hXsym = "\xE2\x97\x89"     -- fish eye
--- local hXsym = "\xE2\x96\x97"     -- quadrant lower right
+-- local hXsym = "\u{271A}"     -- heavy greek cross
+-- local hXsym = "\u{25E2}"     -- black lower right triangle
+-- local hXsym = "\u{25C9}"     -- fish eye
+-- local hXsym = "\u{2597}"     -- quadrant lower right
 
 local ext_to_mimetype = {
     png = "image/png",
@@ -798,14 +800,18 @@ function Wikipedia:createEpub(epub_path, page, lang, with_images)
     logger.dbg("Images found in html:", images)
 
     -- See what to do with images
-    local include_images = false
-    local use_img_2x = false
+    local include_images = G_reader_settings:readSetting("wikipedia_epub_include_images")
+    local use_img_2x = G_reader_settings:readSetting("wikipedia_epub_highres_images")
     if with_images then
         -- If no UI (Trapper:wrap() not called), UI:confirm() will answer true
         if #images > 0 then
-            include_images = UI:confirm(T(_("This article contains %1 images.\nWould you like to download and include them in the generated EPUB file?"), #images), _("Don't include"), _("Include"))
+            if include_images == nil then
+                include_images = UI:confirm(T(_("This article contains %1 images.\nWould you like to download and include them in the generated EPUB file?"), #images), _("Don't include"), _("Include"))
+            end
             if include_images then
-                use_img_2x = UI:confirm(_("Would you like to use slightly higher quality images? This will result in a bigger file size."), _("Standard quality"), _("Higher quality"))
+                if use_img_2x == nil then
+                    use_img_2x = UI:confirm(_("Would you like to use slightly higher quality images? This will result in a bigger file size."), _("Standard quality"), _("Higher quality"))
+                end
             end
         else
             UI:info(_("This article does not contain any images."))
@@ -913,6 +919,84 @@ function Wikipedia:createEpub(epub_path, page, lang, with_images)
     -- to look more alike wikipedia web pages (that the user can ignore
     -- with "Embedded Style" off)
     epub:add("OEBPS/stylesheet.css", [[
+/* Generic styling picked from our epub.css (see it for comments),
+   to give this epub a book look even if used with html5.css */
+body {
+  text-align: justify;
+}
+h1, h2, h3, h4, h5, h6 {
+  margin-top: 0.7em;
+  margin-bottom: 0.5em;
+  hyphens: none;
+}
+h1 { font-size: 150%; }
+h2 { font-size: 140%; }
+h3 { font-size: 130%; }
+h4 { font-size: 120%; }
+h5 { font-size: 110%; }
+h6 { font-size: 100%; }
+p {
+  text-indent: 1.2em;
+  margin-top: 0;
+  margin-bottom: 0;
+}
+blockquote {
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+  margin-left: 2em;
+  margin-right: 1em;
+}
+blockquote:dir(rtl) {
+  margin-left: 1em;
+  margin-right: 2em;
+}
+dl {
+  margin-left: 0;
+}
+dt {
+  margin-left: 0;
+  margin-top: 0.3em;
+  font-weight: bold;
+}
+dd {
+  margin-left: 1.3em;
+}
+dd:dir(rtl) {
+  margin-left: unset;
+  margin-right: 1.3em;
+}
+pre {
+  text-align: left;
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+}
+hr {
+  border-style: solid;
+}
+table {
+  font-size: 80%;
+  margin: 3px 0;
+  border-spacing: 1px;
+}
+table table { /* stop imbricated tables from getting smaller */
+  font-size: 100%;
+}
+th, td {
+  padding: 3px;
+}
+th {
+  background-color: #DDD;
+  text-align: center;
+}
+table caption {
+  padding: 4px;
+  background-color: #EEE;
+}
+sup { font-size: 70%; }
+sub { font-size: 70%; }
+
+/* Specific for our Wikipedia EPUBs */
+
 /* Make section headers looks left aligned and avoid some page breaks */
 h1, h2 {
     page-break-before: always;
@@ -943,6 +1027,24 @@ hr.koreaderwikifrontpage {
     margin-right: 20%;
     margin-bottom: 1.2em;
 }
+/* Have these HR get the same margins and position as our H2 */
+hr.koreaderwikitocstart {
+    page-break-before: always;
+    font-size: 140%;
+    margin: 0.7em 30% 1.5em;
+    height: 0.22em;
+    border: none;
+    background-color: black;
+}
+hr.koreaderwikitocend {
+    page-break-before: avoid;
+    page-break-after: always;
+    font-size: 140%;
+    margin: 1.2em 30% 0;
+    height: 0.22em;
+    border: none;
+    background-color: black;
+}
 
 /* So many links, make them look like normal text except for underline */
 a {
@@ -958,10 +1060,7 @@ a.newwikinonexistent {
 
 /* Don't waste left margin for TOC, notes and other lists */
 ul, ol {
-    margin-left: 0;
-}
-ul:dir(rtl), ol:dir(rtl) {
-    margin-right: 0;
+    margin: 0;
 }
 /* OL in Wikipedia pages may inherit their style-type from a wrapping div,
  * ensure they fallback to decimal with inheritance */
@@ -975,17 +1074,36 @@ ol.references {
 }
 
 /* Show a box around image thumbnails */
-div.thumb {
+figure[typeof~='mw:File/Thumb'],
+figure[typeof~='mw:File/Frame'] {
+    display: table;
     border: dotted 1px black;
     margin:  0.5em 2.5em 0.5em 2.5em;
-    padding: 0.5em 0.5em 0.2em 0.5em;
-    padding-top: ]].. (include_images and "0.5em" or "0.15em") .. [[;
+    padding: 0 0.5em 0 0.5em;
+    padding-top: ]].. (include_images and "0.5em" or "0") .. [[;
     text-align: center;
     font-size: 90%;
     page-break-inside: avoid;
+    -cr-only-if: float-floatboxes;
+        max-width: 50vw; /* ensure we never take half of screen width */
+    -cr-only-if: -float-floatboxes;
+        width: 100% !important;
+    -cr-only-if: legacy;
+        display: block;
 }
-/* Allow main thumbnails to float */
-body > div > div.thumb {
+figure[typeof~='mw:File/Thumb'] > figcaption,
+figure[typeof~='mw:File/Frame'] > figcaption {
+    display: table-caption;
+    caption-side: bottom;
+    padding: 0.2em 0.5em 0.2em 0.5em;
+    /* No padding-top if image, as the image's strut brings some enough spacing */
+    padding-top: ]].. (include_images and "0" or "0.2em") .. [[;
+    -cr-only-if: legacy;
+        display: block;
+}
+/* Allow main thumbnails to float, preferably on the right */
+body > div > figure[typeof~='mw:File/Thumb'],
+body > div > figure[typeof~='mw:File/Frame'] {
     float: right !important;
     /* Change some of their styles when floating */
     -cr-only-if: float-floatboxes;
@@ -996,39 +1114,48 @@ body > div > div.thumb {
     -cr-only-if: float-floatboxes -allow-style-w-h-absolute-units;
         width: 33% !important;
 }
-body > div:dir(rtl) > div.thumb { /* invert if RTL */
+/* invert if RTL */
+body > div:dir(rtl) > figure[typeof~='mw:File/Thumb'],
+body > div:dir(rtl) > figure[typeof~='mw:File/Frame'] {
     float: left !important;
     -cr-only-if: float-floatboxes;
         clear: left;
         margin:  0 0.5em 0.2em 0 !important;
 }
 /* Allow original mix of left/right floats in web mode */
-body > div > div.thumb.tleft {
+body > div > figure[typeof~='mw:File/Thumb'].mw-halign-left,
+body > div > figure[typeof~='mw:File/Frame'].mw-halign-left {
     -cr-only-if: float-floatboxes allow-style-w-h-absolute-units;
         float: left !important;
         clear: left;
         margin:  0 0.5em 0.2em 0 !important;
 }
-body > div > div.thumb.tright {
+body > div > figure[typeof~='mw:File/Thumb'].mw-halign-right,
+body > div > figure[typeof~='mw:File/Frame'].mw-halign-right {
     -cr-only-if: float-floatboxes allow-style-w-h-absolute-units;
         float: right !important;
         clear: right;
         margin:  0 0 0.2em 0.5em !important;
 }
-
-body > div > div.thumb img {
+body > div > figure[typeof~='mw:File/Thumb'] > img,
+body > div > figure[typeof~='mw:File/Frame'] > img {
     /* Make float's inner images 100% of their container's width when not in "web" mode */
     -cr-only-if: float-floatboxes -allow-style-w-h-absolute-units;
         width: 100% !important;
         height: 100% !important;
 }
-
-/* Some other (usually wide) thumbnails are wrapped in a DIV.center:
- * avoid having them overflowing in web mode (no issue in other modes).
- * (Use "width: auto", as crengine does not support "max-width:") */
-body > div > div.center > div.thumb * {
-    -cr-only-if: allow-style-w-h-absolute-units;
-        width: auto !important;
+/* For centered figure, we need to reset a few things, and to not
+ * use display:table if we want them wide and centered */
+body > div > figure[typeof~='mw:File/Thumb'].mw-halign-center,
+body > div > figure[typeof~='mw:File/Frame'].mw-halign-center {
+    display: block;
+    float: none !important;
+    margin:  0.5em 2.5em 0.5em 2.5em !important;
+    max-width: none;
+}
+body > div > figure[typeof~='mw:File/Thumb'].mw-halign-center > figcaption,
+body > div > figure[typeof~='mw:File/Frame'].mw-halign-center > figcaption{
+    display: block;
 }
 
 /* Style gallery and the galleryboxes it contains.
@@ -1081,6 +1208,7 @@ li.gallerybox {
     -cr-only-if: -float-floatboxes;
         width: 100% !important; /* flat mode: force full width */
     -cr-only-if: float-floatboxes;
+        font-size: 80%;
         /* Remove our wide horizontal margins in book/web modes */
         margin:  0.5em 0.5em 0.5em 0.5em !important;
     -cr-only-if: float-floatboxes -allow-style-w-h-absolute-units;
@@ -1097,6 +1225,7 @@ li.gallerybox div.thumb {
     border: solid 1px white;
     margin: 0;
     padding: 0;
+    height: auto !important;
 }
 li.gallerybox div.thumb div {
     /* Override this one often set in style="" with various values */
@@ -1126,6 +1255,11 @@ table {
 .citation {
     font-style: italic;
 }
+abbr.abbr {
+    /* Prevent these from looking like a link */
+    text-decoration: inherit;
+}
+
 /* hide some view/edit/discuss short links displayed as "v m d" */
 .nv-view, .nv-edit, .nv-talk {
     display: none;
@@ -1215,8 +1349,66 @@ table {
     epub:add("OEBPS/toc.ncx", table.concat(toc_ncx_parts))
 
     -- ----------------------------------------------------------------
+    -- HTML table of content
+    -- We used to have it in the HTML we got from Wikipedia, but we no longer do.
+    -- So, build it from the 'sections' we got from the API.
+    local toc_html_parts = {}
+    -- Unfortunately, we don't and can't get any localized "Contents" or "Sommaire" to use
+    -- as a heading. So, use some <hr> at start and at end to make this HTML ToC stand out.
+    table.insert(toc_html_parts, '<hr class="koreaderwikitocstart"/>\n')
+    cur_level = 0
+    for isec, s in ipairs(sections) do
+        -- Some chars in headings are converted to html entities in the
+        -- wikipedia-generated HTML. We need to do the same in TOC links
+        -- for the links to be valid.
+        local s_anchor = s.anchor:gsub("&", "&amp;"):gsub('"', "&quot;"):gsub(">", "&gt;"):gsub("<", "&lt;")
+        local s_title = string.format("%s %s", s.number, s.line)
+        local s_level = s.toclevel
+        if s_level == cur_level then
+            table.insert(toc_html_parts, "</li>")
+        elseif s_level < cur_level then
+            table.insert(toc_html_parts, "</li>")
+            while cur_level > s_level do
+                cur_level = cur_level - 1
+                table.insert(toc_html_parts, "\n"..(" "):rep(cur_level))
+                table.insert(toc_html_parts, "</ul>")
+                table.insert(toc_html_parts, "\n"..(" "):rep(cur_level))
+                table.insert(toc_html_parts, "</li>")
+            end
+        else -- s_level > cur_level
+            while cur_level < s_level do
+                table.insert(toc_html_parts, "\n"..(" "):rep(cur_level))
+                table.insert(toc_html_parts, "<ul>")
+                cur_level = cur_level + 1
+            end
+        end
+        cur_level = s_level
+        table.insert(toc_html_parts, "\n"..(" "):rep(cur_level))
+        table.insert(toc_html_parts, string.format([[<li><div><a href="#%s">%s</a></div>]], s_anchor, s_title))
+    end
+    -- close nested <ul>
+    table.insert(toc_html_parts, "</li>")
+    while cur_level > 0 do
+        cur_level = cur_level - 1
+        table.insert(toc_html_parts, "\n"..(" "):rep(cur_level))
+        table.insert(toc_html_parts, "</ul>")
+        if cur_level > 0 then
+            table.insert(toc_html_parts, "\n"..(" "):rep(cur_level))
+            table.insert(toc_html_parts, "</li>")
+        end
+    end
+    table.insert(toc_html_parts, '<hr class="koreaderwikitocend"/>\n')
+    html = html:gsub([[<meta property="mw:PageProp/toc" />]], table.concat(toc_html_parts))
+
+    -- ----------------------------------------------------------------
     -- OEBPS/content.html
     -- Some small fixes to Wikipedia HTML to make crengine and the user happier
+
+    -- In some articles' HTML, we may get <link rel="mw-deduplicated-inline-style" href="mw-data...">
+    -- (which, by specs, is an empty element) without the proper empty tag ending "/>", which
+    -- would cause crengine's EPUB XHTML parser to wait for a proper </link>, hiding all the
+    -- following content... So, just remove them, as we don't make any use of them.
+    html = html:gsub("<link [^>]*>", "")
 
     -- Most images are in a link to the image info page, which is a useless
     -- external link for us, so let's remove this link.

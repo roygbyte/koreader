@@ -28,6 +28,7 @@ local Screen = require("device").screen
 local UIManager = require("ui/uimanager")
 local Widget = require("ui/widget/widget")
 local logger = require("logger")
+local util = require("util")
 
 -- DPI_SCALE can't change without a restart, so let's compute it now
 local function get_dpi_scale()
@@ -73,6 +74,7 @@ local ImageWidget = Widget:extend{
     dim = nil,
     alpha = false, -- honors alpha values from the image
     is_icon = false, -- set to true by sub-class IconWidget
+    original_in_nightmode = true, -- defaults to display the original image colors in nightmode
 
     -- When rotation_angle is not 0, native image is rotated by this angle
     -- before scaling.
@@ -111,7 +113,7 @@ local ImageWidget = Widget:extend{
     _max_off_center_y_ratio = 0,
 
     -- So we can reset self.scale_factor to its initial value in free(), in
-    -- case this same object is free'd but re-used and and re-render'ed
+    -- case this same object is free'd but re-used and re-render'ed
     _initial_scale_factor = nil,
 
     _bb = nil,
@@ -129,9 +131,8 @@ function ImageWidget:_loadimage()
 end
 
 function ImageWidget:_loadfile()
-    local itype = string.lower(string.match(self.file, ".+%.([^.]+)") or "")
-    if itype == "svg" or itype == "png" or itype == "jpg" or itype == "jpeg"
-            or itype == "gif" or itype == "tiff" or itype == "tif" then
+    local DocumentRegistry = require("document/documentregistry")
+    if DocumentRegistry:isImageFile(self.file) then
         -- In our use cases for files (icons), we either provide width and height,
         -- or just scale_for_dpi, and scale_factor should stay nil.
         -- Other combinations will result in double scaling, and unexpected results.
@@ -159,7 +160,7 @@ function ImageWidget:_loadfile()
             self._bb_disposable = false -- don't touch or free a cached _bb
             self._is_straight_alpha = cached.is_straight_alpha
         else
-            if itype == "svg" then
+            if util.getFileNameSuffix(self.file) == "svg" then
                 local zoom
                 if scale_for_dpi_here then
                     zoom = DPI_SCALE
@@ -399,7 +400,6 @@ function ImageWidget:getScaleFactorExtrema()
 
     -- Compute dynamic limits for the scale factor, based on the screen's area and available memory (if possible).
     -- Extrema eyeballed to be somewhat sensible given our usual screen dimensions and available RAM.
-    local util = require("util")
     local memfree, _ = util.calcFreeMem()
 
     local screen_area = Screen:getWidth() * Screen:getHeight()
@@ -515,11 +515,16 @@ function ImageWidget:paintTo(bb, x, y)
     if self.hide then return end
     -- self:_render is called in getSize method
     local size = self:getSize()
-    self.dimen = Geom:new{
-        x = x, y = y,
-        w = size.w,
-        h = size.h
-    }
+    if not self.dimen then
+        self.dimen = Geom:new{
+            x = x, y = y,
+            w = size.w,
+            h = size.h
+        }
+    else
+        self.dimen.x = x
+        self.dimen.y = y
+    end
     logger.dbg("blitFrom", x, y, self._offset_x, self._offset_y, size.w, size.h)
     local do_alpha = false
     if self.alpha == true then
@@ -579,7 +584,7 @@ function ImageWidget:paintTo(bb, x, y)
     ---        but we currently don't, as we don't really trickle down
     ---        a way to discriminate them from the B&W ones.
     ---        Currently, this is *only* the KOReader icon in Help, AFAIK.
-    if Screen.night_mode and not self.is_icon then
+    if Screen.night_mode and self.original_in_nightmode and not self.is_icon then
         bb:invertRect(x, y, size.w, size.h)
     end
 end

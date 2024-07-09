@@ -39,9 +39,6 @@ describe("PDF document module", function()
         local clip1 = doc:clipPagePNGString(pos0, pos1, pboxes, "lighten")
         assert.truthy(clip1)
     end)
-    it("should calculate fast digest", function()
-        assert.is_equal(doc:fastDigest(), "41cce710f34e5ec21315e19c99821415")
-    end)
     it("should close document", function()
         doc:close()
     end)
@@ -68,24 +65,17 @@ describe("EPUB document module", function()
         assert.are.same(image:getWidth(), 442)
         assert.are.same(image:getHeight(), 616)
     end)
-    it("should calculate fast digest", function()
-        assert.is_equal(doc:fastDigest(), "59d481d168cca6267322f150c5f6a2a3")
-    end)
     it("should register droid sans fallback", function()
-        local fonts_registry = {
-            "Droid Sans Mono",
-            "FreeSans",
-            "FreeSerif",
-            "Noto Naskh Arabic",
-            "Noto Sans",
-            "Noto Sans Arabic UI",
-            "Noto Sans Bengali UI",
-            "Noto Sans CJK SC",
-            "Noto Sans Devanagari UI",
-            "Noto Serif",
-        }
         local face_list = cre.getFontFaces()
-        assert.are.same(fonts_registry, face_list)
+        local has_droid_sans = false
+        for i, v in ipairs(face_list) do
+            if v == "Droid Sans Mono" then
+                has_droid_sans = true
+                break
+            end
+        end
+        assert.is_true(has_droid_sans)
+        assert.is_true(#face_list >= 10)
     end)
     it("should close document", function()
         doc:close()

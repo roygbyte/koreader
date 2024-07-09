@@ -1,5 +1,6 @@
 local BD = require("ui/bidi")
 local Device = require("device")
+local IsoLanguage = require("ui/data/isolanguage")
 local optionsutil = require("ui/data/optionsutil")
 local util = require("util")
 local _ = require("gettext")
@@ -10,6 +11,16 @@ local Screen = Device.screen
 local FONT_SCALE_FACTORS = {0.2, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.3, 1.6, 2.0}
 -- Font sizes used for the font size widget only
 local FONT_SCALE_DISPLAY_SIZE = {12, 14, 15, 16, 17, 18, 19, 20, 22, 25, 30, 35}
+
+local KOPTREADER_CONFIG_DOC_LANGS_TEXT = {}
+for _, lang in ipairs(G_defaults:readSetting("DKOPTREADER_CONFIG_DOC_LANGS_CODE")) do
+    local langName = IsoLanguage:getLocalizedLanguage(lang)
+    if langName then
+        table.insert(KOPTREADER_CONFIG_DOC_LANGS_TEXT, langName)
+    else
+        table.insert(KOPTREADER_CONFIG_DOC_LANGS_TEXT, lang)
+    end
+end
 
 -- Get font scale numbers as a table of strings
 local tableOfNumbersToTableOfStrings = function(numbers)
@@ -29,7 +40,8 @@ local KoptOptions = {
                 name = "rotation_mode",
                 name_text = _("Rotation"),
                 item_icons_func = function()
-                    if Screen:getRotationMode() == Screen.DEVICE_ROTATED_UPRIGHT then
+                    local mode = Screen:getRotationMode()
+                    if mode == Screen.DEVICE_ROTATED_UPRIGHT then
                         -- P, 0UR
                         return {
                             "rotation.P.90CCW",
@@ -37,7 +49,7 @@ local KoptOptions = {
                             "rotation.P.90CW",
                             "rotation.P.180UD",
                         }
-                    elseif Screen:getRotationMode() == Screen.DEVICE_ROTATED_UPSIDE_DOWN then
+                    elseif mode == Screen.DEVICE_ROTATED_UPSIDE_DOWN then
                         -- P, 180UD
                         return {
                             "rotation.P.90CW",
@@ -45,7 +57,7 @@ local KoptOptions = {
                             "rotation.P.90CCW",
                             "rotation.P.0UR",
                         }
-                    elseif Screen:getRotationMode() == Screen.DEVICE_ROTATED_CLOCKWISE then
+                    elseif mode == Screen.DEVICE_ROTATED_CLOCKWISE then
                         -- L, 90CW
                         return {
                             "rotation.L.90CCW",
@@ -67,8 +79,8 @@ local KoptOptions = {
                 labels = {C_("Rotation", "⤹ 90°"), C_("Rotation", "↑ 0°"), C_("Rotation", "⤸ 90°"), C_("Rotation", "↓ 180°")},
                 alternate = false,
                 values = {Screen.DEVICE_ROTATED_COUNTER_CLOCKWISE, Screen.DEVICE_ROTATED_UPRIGHT, Screen.DEVICE_ROTATED_CLOCKWISE, Screen.DEVICE_ROTATED_UPSIDE_DOWN},
+                default_value = Screen.DEVICE_ROTATED_UPRIGHT,
                 args = {Screen.DEVICE_ROTATED_COUNTER_CLOCKWISE, Screen.DEVICE_ROTATED_UPRIGHT, Screen.DEVICE_ROTATED_CLOCKWISE, Screen.DEVICE_ROTATED_UPSIDE_DOWN},
-                default_arg = 0,
                 current_func = function() return Screen:getRotationMode() end,
                 event = "SetRotationMode",
                 name_text_hold_callback = optionsutil.showValues,
@@ -87,7 +99,9 @@ local KoptOptions = {
                 alternate = false,
                 values = {3, 1, 2, 0},
                 default_value = G_defaults:readSetting("DKOPTREADER_CONFIG_TRIM_PAGE"),
-                enabled_func = function() return Device:isTouchDevice() or Device:hasDPad() end,
+                enabled_func = function()
+                    return Device:isTouchDevice() or Device:hasDPad()
+                end,
                 event = "PageCrop",
                 args = {"none", "auto", "semi-auto", "manual"},
                 name_text_hold_callback = optionsutil.showValues,
@@ -125,6 +139,9 @@ In 'semi-auto' and 'manual' modes, you may need to define areas once on an odd p
                 event = "DummyEvent",
                 args = {0, 5, 10, 15, 25},
                 more_options = true,
+                more_options_param = {
+                    unit = "°",
+                },
                 default_value = G_defaults:readSetting("DKOPTREADER_CONFIG_AUTO_STRAIGHTEN"),
                 name_text_hold_callback = optionsutil.showValues,
                 help_text = _([[Attempt to automatically straighten tilted source pages.
@@ -138,8 +155,7 @@ Will rotate up to specified value.]]),
             {
                 name = "zoom_overlap_h",
                 name_text = _("Horizontal overlap"),
-                enabled_func = function(configurable, document)
-                    -- NOTE: document.is_reflowable is wonky as hell, don't trust it.
+                enabled_func = function(configurable)
                     return optionsutil.enableIfEquals(configurable, "text_wrap", 0)
                 end,
                 buttonprogress = true,
@@ -147,8 +163,8 @@ Will rotate up to specified value.]]),
                 values = {0, 12, 24, 36, 48, 60, 72, 84},
                 default_pos = 4,
                 default_value = 36,
-                show_func = function(config)
-                    return config and config.zoom_mode_genus < 3
+                show_func = function(configurable)
+                    return configurable.zoom_mode_genus < 3
                 end,
                 event = "DefineZoom",
                 args =   {0, 12, 24, 36, 48, 60, 72, 84},
@@ -160,8 +176,7 @@ Will rotate up to specified value.]]),
             {
                 name = "zoom_overlap_v",
                 name_text = _("Vertical overlap"),
-                enabled_func = function(configurable, document)
-                    -- NOTE: document.is_reflowable is wonky as hell, don't trust it.
+                enabled_func = function(configurable)
                     return optionsutil.enableIfEquals(configurable, "text_wrap", 0)
                 end,
                 buttonprogress = true,
@@ -169,8 +184,8 @@ Will rotate up to specified value.]]),
                 values = {0, 12, 24, 36, 48, 60, 72, 84},
                 default_pos = 4,
                 default_value = 36,
-                show_func = function(config)
-                    return config and config.zoom_mode_genus < 3
+                show_func = function(configurable)
+                    return configurable.zoom_mode_genus < 3
                 end,
                 event = "DefineZoom",
                 args =   {0, 12, 24, 36, 48, 60, 72, 84},
@@ -182,15 +197,16 @@ Will rotate up to specified value.]]),
             {
                 name = "zoom_mode_type",
                 name_text = _("Fit"),
-                enabled_func = function(configurable, document)
-                    -- NOTE: document.is_reflowable is wonky as hell, don't trust it.
+                enabled_func = function(configurable)
                     return optionsutil.enableIfEquals(configurable, "text_wrap", 0)
                 end,
                 toggle = {_("full"), _("width"), _("height")},
                 alternate = false,
                 values = {2, 1, 0},
                 default_value = 1,
-                show_func = function(config) return config and config.zoom_mode_genus > 2 end,
+                show_func = function(configurable)
+                    return configurable.zoom_mode_genus > 2
+                end,
                 event = "DefineZoom",
                 args = {"full", "width", "height"},
                 name_text_hold_callback = optionsutil.showValues,
@@ -198,17 +214,11 @@ Will rotate up to specified value.]]),
             },
             {
                 name = "zoom_range_number",
-                name_text_func = function(config)
-                    if config then
-                        if config.zoom_mode_genus == 1 then return _("Rows")
-                        elseif config.zoom_mode_genus == 2 then return _("Columns")
-                        end
-                    end
-                    return _("Number")
+                name_text_func = function(configurable)
+                    return ({_("Rows"), _("Columns")})[configurable.zoom_mode_genus]
                 end,
                 name_text_true_values = true,
-                enabled_func = function(configurable, document)
-                    -- NOTE: document.is_reflowable is wonky as hell, don't trust it.
+                enabled_func = function(configurable)
                     return optionsutil.enableIfEquals(configurable, "text_wrap", 0)
                 end,
                 show_true_value_func = function(str)
@@ -218,14 +228,14 @@ Will rotate up to specified value.]]),
                 more_options = true,
                 more_options_param = {
                     value_step = 0.1, value_hold_step = 1,
-                    value_min = 0.1, value_max = 1000,
+                    value_min = 0.1, value_max = 8,
                     precision = "%.1f",
                 },
                 values = {1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0},
                 default_pos = 2,
                 default_value = 2,
-                show_func = function(config)
-                    return config and config.zoom_mode_genus < 3 and config.zoom_mode_genus > 0
+                show_func = function(configurable)
+                    return configurable.zoom_mode_genus == 1 or configurable.zoom_mode_genus == 2
                 end,
                 event = "DefineZoom",
                 args =   {1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0},
@@ -237,8 +247,7 @@ Will rotate up to specified value.]]),
                 name = "zoom_factor",
                 name_text = _("Zoom factor"),
                 name_text_true_values = true,
-                enabled_func = function(configurable, document)
-                    -- NOTE: document.is_reflowable is wonky as hell, don't trust it.
+                enabled_func = function(configurable)
                     return optionsutil.enableIfEquals(configurable, "text_wrap", 0)
                 end,
                 show_true_value_func = function(str)
@@ -248,14 +257,14 @@ Will rotate up to specified value.]]),
                 more_options = true,
                 more_options_param = {
                     value_step = 0.1, value_hold_step = 1,
-                    value_min = 0.1, value_max = 1000,
+                    value_min = 0.1, value_max = 20,
                     precision = "%.1f",
                 },
                 values = {0.7, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0, 20.0},
                 default_pos = 3,
                 default_value = 1.5,
-                show_func = function(config)
-                    return config and config.zoom_mode_genus < 1
+                show_func = function(configurable)
+                    return configurable.zoom_mode_genus == 0
                 end,
                 event = "DefineZoom",
                 args = {0.7, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0, 20.0},
@@ -265,8 +274,7 @@ Will rotate up to specified value.]]),
             {
                 name = "zoom_mode_genus",
                 name_text = _("Zoom to"),
-                enabled_func = function(configurable, document)
-                    -- NOTE: document.is_reflowable is wonky as hell, don't trust it.
+                enabled_func = function(configurable)
                     return optionsutil.enableIfEquals(configurable, "text_wrap", 0)
                 end,
                 -- toggle = {_("page"), _("content"), _("columns"), _("rows"), _("manual")},
@@ -288,8 +296,8 @@ Will rotate up to specified value.]]),
             {
                 name = "zoom_direction",
                 name_text = _("Direction"),
-                enabled_func = function(config)
-                    return optionsutil.enableIfEquals(config, "text_wrap", 0) and config.zoom_mode_genus < 3
+                enabled_func = function(configurable)
+                    return optionsutil.enableIfEquals(configurable, "text_wrap", 0) and configurable.zoom_mode_genus < 3
                 end,
                 item_icons = {
                     "direction.LRTB",
@@ -388,7 +396,7 @@ left to right or reverse, top to bottom or reverse.]]),
                     "align.right",
                     "align.justify",
                 },
-                values = {-1,0,1,2,3},
+                values = {-1, 0, 1, 2, 3},
                 default_value = G_defaults:readSetting("DKOPTREADER_CONFIG_JUSTIFICATION"),
                 advanced = true,
                 enabled_func = function(configurable)
@@ -420,8 +428,7 @@ The first option ("auto") tries to automatically align reflowed text as it is in
                 values = FONT_SCALE_FACTORS,
                 default_value = G_defaults:readSetting("DKOPTREADER_CONFIG_FONT_SIZE"),
                 event = "FontSizeUpdate",
-                enabled_func = function(configurable, document)
-                    if document.is_reflowable then return true end
+                enabled_func = function(configurable)
                     return optionsutil.enableIfEquals(configurable, "text_wrap", 1)
                 end,
             },
@@ -435,8 +442,7 @@ The first option ("auto") tries to automatically align reflowed text as it is in
                 event = "FineTuningFontSize",
                 args = {-0.05, 0.05},
                 alternate = false,
-                enabled_func = function(configurable, document)
-                    if document.is_reflowable then return true end
+                enabled_func = function(configurable)
                     return optionsutil.enableIfEquals(configurable, "text_wrap", 1)
                 end,
                 name_text_hold_callback = function(configurable, __, prefix)
@@ -483,7 +489,7 @@ Some of the other settings are only available when reflow mode is enabled.]]),
                 buttonprogress = true,
                 -- See https://github.com/koreader/koreader/issues/1299#issuecomment-65183895
                 -- For pdf reflowing mode (kopt_contrast):
-                values = {1/0.8, 1/1.0, 1/1.5, 1/2.0, 1/4.0, 1/6.0, 1/10.0, 1/50.0},
+                values = {0.8, 1.0, 1.5, 2.0, 4.0, 6.0, 10.0, 50.0},
                 default_pos = 2,
                 default_value = G_defaults:readSetting("DKOPTREADER_CONFIG_CONTRAST"),
                 event = "GammaUpdate",
@@ -491,6 +497,12 @@ Some of the other settings are only available when reflow mode is enabled.]]),
                 args =   {0.8, 1.0, 1.5, 2.0, 4.0, 6.0, 10.0, 50.0},
                 labels = {0.8, 1.0, 1.5, 2.0, 4.0, 6.0, 10.0, 50.0},
                 name_text_hold_callback = optionsutil.showValues,
+                more_options = true,
+                more_options_param = {
+                    value_step = 0.1, value_hold_step = 1,
+                    value_min = 0.8, value_max = 50,
+                    precision = "%.1f",
+                },
             },
             {
                 name = "page_opt",
@@ -549,7 +561,7 @@ This can also be used to remove some gray background or to convert a grayscale o
             {
                 name = "doc_language",
                 name_text = _("Document Language"),
-                toggle = G_defaults:readSetting("DKOPTREADER_CONFIG_DOC_LANGS_TEXT"),
+                toggle = KOPTREADER_CONFIG_DOC_LANGS_TEXT,
                 values = G_defaults:readSetting("DKOPTREADER_CONFIG_DOC_LANGS_CODE"),
                 default_value = G_defaults:readSetting("DKOPTREADER_CONFIG_DOC_DEFAULT_LANG_CODE"),
                 event = "DocLangUpdate",

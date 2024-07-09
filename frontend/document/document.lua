@@ -40,6 +40,9 @@ local Document = {
     -- bb type needed by engine for color rendering
     color_bb_type = Blitbuffer.TYPE_BBRGB32,
 
+    -- image content stats, if supported by the engine
+    _drawn_images_count = nil,
+    _drawn_images_surface_ratio = nil,
 }
 
 function Document:extend(subclass_prototype)
@@ -92,6 +95,10 @@ function Document:_init()
     self.hw_dithering = false
     -- Whether SW dithering is enabled
     self.sw_dithering = false
+
+    -- Zero-init those to be able to drop the nil guards at runtime
+    self._drawn_images_count = 0
+    self._drawn_images_surface_ratio = 0
 end
 
 -- override this method to open a document
@@ -143,58 +150,9 @@ function Document:discardChange()
     self.is_edited = false
 end
 
--- calculate partial digest of the document and store in its docsettings to avoid document saving
--- feature to change its checksum.
---
--- To the calculating mechanism itself.
--- since only PDF documents could be modified by KOReader by appending data
--- at the end of the files when highlighting, we use a non-even sampling
--- algorithm which samples with larger weight at file head and much smaller
--- weight at file tail, thus reduces the probability that appended data may change
--- the digest value.
--- Note that if PDF file size is around 1024, 4096, 16384, 65536, 262144
--- 1048576, 4194304, 16777216, 67108864, 268435456 or 1073741824, appending data
--- by highlighting in KOReader may change the digest value.
-function Document:fastDigest(docsettings)
-    if not self.file then return end
-    local file = io.open(self.file, 'rb')
-    if file then
-        local tmp_docsettings = false
-        if not docsettings then -- if not provided, open/create it
-            docsettings = require("docsettings"):open(self.file)
-            tmp_docsettings = true
-        end
-        local result = docsettings:readSetting("partial_md5_checksum")
-        if not result then
-            logger.dbg("computing and storing partial_md5_checksum")
-            local bit = require("bit")
-            local md5 = require("ffi/sha2").md5
-            local lshift = bit.lshift
-            local step, size = 1024, 1024
-            local update = md5()
-            for i = -1, 10 do
-                file:seek("set", lshift(step, 2*i))
-                local sample = file:read(size)
-                if sample then
-                    update(sample)
-                else
-                    break
-                end
-            end
-            result = update()
-            docsettings:saveSetting("partial_md5_checksum", result)
-        end
-        if tmp_docsettings then
-            docsettings:close()
-        end
-        file:close()
-        return result
-    end
-end
-
 -- this might be overridden by a document implementation
 function Document:getNativePageDimensions(pageno)
-    local hash = "pgdim|"..self.file.."|"..pageno
+    local hash = "pgdim|"..self.file.."|"..self.mod_time.."|"..pageno
     local cached = DocCache:check(hash)
     if cached then
         return cached[1]
@@ -207,8 +165,53 @@ function Document:getNativePageDimensions(pageno)
     return page_size
 end
 
-function Document:getProps()
-    return self._document:getDocumentProps()
+function Document:getDocumentProps()
+    -- pdfdocument, djvudocument
+    return self._document:getMetadata()
+    -- credocument, picdocument - overridden by a document implementation
+end
+
+function Document:getProps(cached_doc_metadata)
+    local function makeNilIfEmpty(str)
+        if str == "" then
+            return nil
+        end
+        return str
+    end
+    local props = cached_doc_metadata or self:getDocumentProps()
+    local title = makeNilIfEmpty(props.title or props.Title)
+    local authors = makeNilIfEmpty(props.authors or props.author or props.Author)
+    local series = makeNilIfEmpty(props.series or props.Series)
+    local series_index
+    if series and string.find(series, "#") then
+        -- If there's a series index in there, split it off to series_index, and only store the name in series.
+        -- This property is currently only set by:
+        --   * DjVu, for which I couldn't find a real standard for metadata fields
+        --     (we currently use Series for this field, c.f., https://exiftool.org/TagNames/DjVu.html).
+        --   * CRe, which could offer us a split getSeriesName & getSeriesNumber...
+        --     except getSeriesNumber does an atoi, so it'd murder decimal values.
+        --     So, instead, parse how it formats the whole thing as a string ;).
+        local series_name
+        series_name, series_index = series:match("(.*) #(%d+%.?%d-)$")
+        if series_index then
+            series = series_name
+            series_index = tonumber(series_index)
+        end
+    end
+    local language = makeNilIfEmpty(props.language or props.Language)
+    local keywords = makeNilIfEmpty(props.keywords or props.Keywords)
+    local description = makeNilIfEmpty(props.description or props.Description or props.subject)
+    local identifiers = makeNilIfEmpty(props.identifiers)
+    return {
+        title        = title,
+        authors      = authors,
+        series       = series,
+        series_index = series_index,
+        language     = language,
+        keywords     = keywords,
+        description  = description,
+        identifiers  = identifiers,
+    }
 end
 
 function Document:_readMetadata()
@@ -234,13 +237,13 @@ end
 
 function Document:getNextPage(page)
     local new_page = page + 1
-    return (new_page > 0 and new_page < self.info.number_of_pages) and new_page or 0
+    return (new_page > 0 and new_page <= self.info.number_of_pages) and new_page or 0
 end
 
 function Document:getPrevPage(page)
     if page == 0 then return self.info.number_of_pages end
     local new_page = page - 1
-    return (new_page > 0 and new_page < self.info.number_of_pages) and new_page or 0
+    return (new_page > 0 and new_page <= self.info.number_of_pages) and new_page or 0
 end
 
 function Document:getTotalPagesLeft(page)
@@ -369,6 +372,10 @@ function Document:getCoverPageImage()
 end
 
 function Document:findText()
+    return nil
+end
+
+function Document:findAllText()
     return nil
 end
 
@@ -528,6 +535,7 @@ end
 
 function Document:getDrawnImagesStatistics()
     -- For now, only set by CreDocument in CreDocument:drawCurrentView()
+    -- Returns 0, 0 (as per Document:init) otherwise.
     return self._drawn_images_count, self._drawn_images_surface_ratio
 end
 

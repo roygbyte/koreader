@@ -61,7 +61,6 @@ local ReaderRolling = InputContainer:extend{
     xpointer = nil,
     panning_steps = ReaderPanning.panning_steps,
     cre_top_bar_enabled = false,
-    visible_pages = 1,
     -- With visible_pages=2, in 2-pages mode, ensure the first
     -- page is always odd or even (odd is logical to avoid a
     -- same page when turning first 2-pages set of document)
@@ -78,7 +77,11 @@ local ReaderRolling = InputContainer:extend{
         FULL_RENDERING_READY = 3,
         RELOADING_DOCUMENT = 4,
         DO_RELOAD_DOCUMENT = 5,
-    }
+    },
+
+    mark_func = nil,
+    unmark_func = nil,
+    _stepRerenderingAutomation = nil,
 }
 
 function ReaderRolling:init()
@@ -97,7 +100,7 @@ function ReaderRolling:init()
             self.valid_cache_rendering_hash = self.ui.document:getDocumentRenderingHash(false)
         end
     end)
-    table.insert(self.ui.postReaderCallback, function()
+    table.insert(self.ui.postReaderReadyCallback, function()
         self:updatePos()
         -- Disable crengine internal history, with required redraw
         self.ui.document:enableInternalHistory(false)
@@ -113,7 +116,30 @@ end
 function ReaderRolling:onGesture() end
 
 function ReaderRolling:registerKeyEvents()
-    if Device:hasKeys() then
+    if Device:hasScreenKB() or Device:hasSymKey() then
+        self.key_events.GotoNextView = {
+            { { "RPgFwd", "LPgFwd" } },
+            event = "GotoViewRel",
+            args = 1,
+        }
+        self.key_events.GotoPrevView = {
+            { { "RPgBack", "LPgBack" } },
+            event = "GotoViewRel",
+            args = -1,
+        }
+        if Device:hasKeyboard() then
+            self.key_events.MoveUp = {
+                { "Shift", "RPgBack" },
+                event = "Panning",
+                args = {0, -1},
+            }
+            self.key_events.MoveDown = {
+                { "Shift", "RPgFwd" },
+                event = "Panning",
+                args = {0,  1},
+            }
+        end
+    elseif Device:hasKeys() then
         self.key_events.GotoNextView = {
             { { "RPgFwd", "LPgFwd", "Right" } },
             event = "GotoViewRel",
@@ -125,7 +151,18 @@ function ReaderRolling:registerKeyEvents()
             args = -1,
         }
     end
-    if Device:hasDPad() then
+    if Device:hasDPad() and Device:useDPadAsActionKeys() then
+        self.key_events.GotoNextChapter = {
+            { "Right" },
+            event = "GotoNextChapter",
+            args = 1,
+        }
+        self.key_events.GotoPrevChapter = {
+            { "Left" },
+            event = "GotoPrevChapter",
+            args = -1,
+        }
+    elseif Device:hasDPad() then
         self.key_events.MoveUp = {
             { "Up" },
             event = "Panning",
@@ -133,6 +170,18 @@ function ReaderRolling:registerKeyEvents()
         }
         self.key_events.MoveDown = {
             { "Down" },
+            event = "Panning",
+            args = {0,  1},
+        }
+    end
+    if Device:hasScreenKB() then
+        self.key_events.MoveUp = {
+            { "ScreenKB", "RPgBack" },
+            event = "Panning",
+            args = {0, -1},
+        }
+        self.key_events.MoveDown = {
+            { "ScreenKB", "RPgFwd" },
             event = "Panning",
             args = {0,  1},
         }
@@ -231,7 +280,7 @@ function ReaderRolling:onReadSettings(config)
         -- And check if we can migrate to a newest DOM version after
         -- the book is loaded (unless the user told us not to).
         if config:nilOrFalse("cre_keep_old_dom_version") then
-            self.ui:registerPostReadyCallback(function()
+            self.ui:registerPostReaderReadyCallback(function()
                 self:checkXPointersAndProposeDOMVersionUpgrade()
             end)
         end
@@ -274,15 +323,13 @@ function ReaderRolling:onReadSettings(config)
         end
     end
 
-    -- This self.visible_pages may not be the current nb of visible pages
+    -- self.configurable.visible_pages may not be the current nb of visible pages
     -- as crengine may decide to not ensure that in some conditions.
     -- It's the one we got from settings, the one the user has decided on
     -- with config toggle, and the one that we will save for next load.
     -- Use self.ui.document:getVisiblePageCount() to get the current
     -- crengine used value.
-    self.visible_pages = config:readSetting("visible_pages") or
-        G_reader_settings:readSetting("copt_visible_pages") or 1
-    self.ui.document:setVisiblePageCount(self.visible_pages)
+    self.ui.document:setVisiblePageCount(self.configurable.visible_pages)
 
     if config:has("hide_nonlinear_flows") then
         self.hide_nonlinear_flows = config:isTrue("hide_nonlinear_flows")
@@ -312,11 +359,20 @@ function ReaderRolling:onReadSettings(config)
     end)
 end
 
--- in scroll mode percent_finished must be save before close document
--- we cannot do it in onSaveSettings() because getLastPercent() uses self.ui.document
 function ReaderRolling:onCloseDocument()
     self:tearDownRerenderingAutomation()
+    -- Unschedule anything that might still somehow be...
+    if self.mark_func then
+        UIManager:unschedule(self.mark_func)
+    end
+    if self.unmark_func then
+        UIManager:unschedule(self.unmark_func)
+    end
+    UIManager:unschedule(self.onCheckDomStyleCoherence)
+    UIManager:unschedule(self.onUpdatePos)
+
     self.current_header_height = nil -- show unload progress bar at top
+    -- we cannot do it in onSaveSettings() because getLastPercent() uses self.ui.document
     self.ui.doc_settings:saveSetting("percent_finished", self:getLastPercent())
 
     local cache_file_path = self.ui.document:getCacheFilePath() -- nil if no cache file
@@ -352,7 +408,7 @@ function ReaderRolling:onCheckDomStyleCoherence()
             ok_callback = function()
                 -- Allow for ConfirmBox to be closed before showing
                 -- "Opening file" InfoMessage
-                UIManager:scheduleIn(0.5, function ()
+                UIManager:scheduleIn(0.5, function()
                     -- And check we haven't quit reader in these 0.5s
                     if self.ui.document then
                         self.ui:reloadDocument()
@@ -364,16 +420,8 @@ function ReaderRolling:onCheckDomStyleCoherence()
 end
 
 function ReaderRolling:onSaveSettings()
-    -- remove last_percent config since its deprecated
-    self.ui.doc_settings:delSetting("last_percent")
+    self.ui.doc_settings:delSetting("last_percent") -- deprecated
     self.ui.doc_settings:saveSetting("last_xpointer", self.xpointer)
-    -- in scrolling mode, the document may already be closed,
-    -- so we have to check the condition to avoid crash function self:getLastPercent()
-    -- that uses self.ui.document
-    if self.ui.document then
-        self.ui.doc_settings:saveSetting("percent_finished", self:getLastPercent())
-    end
-    self.ui.doc_settings:saveSetting("visible_pages", self.visible_pages)
     self.ui.doc_settings:saveSetting("hide_nonlinear_flows", self.hide_nonlinear_flows)
     self.ui.doc_settings:saveSetting("partial_rerendering", self.partial_rerendering)
 end
@@ -456,7 +504,9 @@ function ReaderRolling:addToMainMenu(menu_items)
         menu_items.hide_nonlinear_flows = {
             text = _("Hide non-linear fragments"),
             enabled_func = function()
+                -- Custom hidden flows have precedence over publisher hidden non-linear fragments
                 return self.view.view_mode == "page" and self.ui.document:getVisiblePageCount() == 1
+                                                     and not self.ui.handmade:isHandmadeHiddenFlowsEnabled()
             end,
             checked_func = function() return self.hide_nonlinear_flows end,
             callback = function()
@@ -805,7 +855,7 @@ end
 
 function ReaderRolling:onGotoXPointer(xp, marker_xp)
     if self.mark_func then
-        -- unschedule previous marker as it's no more accurate
+        -- Unschedule previous marker as it's no longer accurate.
         UIManager:unschedule(self.mark_func)
         self.mark_func = nil
     end
@@ -835,7 +885,7 @@ function ReaderRolling:onGotoXPointer(xp, marker_xp)
         -- where xpointer target is (and remove if after 1s)
         local screen_y, screen_x = self.ui.document:getScreenPositionFromXPointer(marker_xp)
         local doc_margins = self.ui.document:getPageMargins()
-        local marker_h = Screen:scaleBySize(self.ui.font.font_size * 1.1 * self.ui.font.line_space_percent * (1/100))
+        local marker_h = Screen:scaleBySize(self.configurable.font_size * 1.1 * self.configurable.line_spacing * (1/100))
         -- Make it 4/5 of left margin wide (and bigger when huge margin)
         local marker_w = math.floor(math.max(doc_margins["left"] - Screen:scaleBySize(5), doc_margins["left"] * 4/5))
 
@@ -933,7 +983,7 @@ function ReaderRolling:onGotoViewRel(diff)
         local pan_diff = diff * page_visible_height
         if self.view.page_overlap_enable then
             local overlap_lines = G_reader_settings:readSetting("copt_overlap_lines") or 1
-            local overlap_h = Screen:scaleBySize(self.ui.font.font_size * 1.1 * self.ui.font.line_space_percent * (1/100)) * overlap_lines
+            local overlap_h = Screen:scaleBySize(self.configurable.font_size * 1.1 * self.configurable.line_spacing * (1/100)) * overlap_lines
             if pan_diff > overlap_h then
                 pan_diff = pan_diff - overlap_h
             elseif pan_diff < -overlap_h then
@@ -1009,9 +1059,7 @@ function ReaderRolling:onBatchedUpdateDone()
         self.batched_update_count = 0
         -- Be sure any Notification gets a chance to be painted before
         -- a blocking rerendering
-        UIManager:nextTick(function()
-            self:onUpdatePos()
-        end)
+        UIManager:nextTick(self.onUpdatePos, self)
     end
 end
 
@@ -1027,9 +1075,9 @@ function ReaderRolling:onUpdatePos(force)
     if self.batched_update_count > 0 then
         return
     end
-    if self.ui.postReaderCallback ~= nil then -- ReaderUI:init() not yet done
+    if self.ui.postReaderReadyCallback ~= nil then -- ReaderUI:init() not yet done
         -- Don't schedule any updatePos as long as ReaderUI:init() is
-        -- not finished (one will be called in the ui.postReaderCallback
+        -- not finished (one will be called in the ui.postReaderReadyCallback
         -- we have set above) to avoid multiple refreshes.
         return true
     end
@@ -1040,7 +1088,10 @@ function ReaderRolling:onUpdatePos(force)
     -- Calling this now ensures the re-rendering is done by crengine
     -- so updatePos() has good info and can reposition
     -- the previous xpointer accurately:
-    self.ui.document:getCurrentPos()
+    if self.ui.document then
+        -- This can be racy with CloseDocument, as it's scheduled by onBatchedUpdateDone, guard it
+        self.ui.document:getCurrentPos()
+    end
 
     -- Otherwise, _readMetadata() would do that, but the positioning
     -- would not work as expected, for some reason (it worked
@@ -1091,16 +1142,14 @@ function ReaderRolling:updatePos(force)
     -- Allow for the new rendering to be shown before possibly showing
     -- the "Styles have changed..." ConfirmBox so the user can decide
     -- if it is really needed
-    UIManager:scheduleIn(0.1, function ()
-        self:onCheckDomStyleCoherence()
-    end)
+    UIManager:scheduleIn(0.1, self.onCheckDomStyleCoherence, self)
 end
 
 function ReaderRolling:onChangeViewMode()
     self.current_header_height = self.view.view_mode == "page" and self.ui.document:getHeaderHeight() or 0
     -- Restore current position when switching page/scroll mode
     if self.xpointer then
-        if self.visible_pages == 2 then
+        if self.configurable.visible_pages == 2 then
             -- Switching from 2-pages page mode to scroll mode has crengine switch to 1-page,
             -- and we need to notice this re-rendering and keep things sane
             self:onUpdatePos()
@@ -1126,7 +1175,7 @@ function ReaderRolling:onRedrawCurrentView()
 end
 
 function ReaderRolling:onSetDimensions(dimen)
-    if self.ui.postReaderCallback ~= nil then
+    if self.ui.postReaderReadyCallback ~= nil then
         -- ReaderUI:init() not yet done: just set document dimensions
         self.ui.document:setViewDimen(Screen:getSize())
         -- (what's done in the following else is done elsewhere by
@@ -1258,7 +1307,7 @@ function ReaderRolling:onSetVisiblePages(visible_pages)
     -- We nevertheless update the setting (that will be saved) with what
     -- the user has requested - and not what crengine has enforced, and
     -- always query crengine for if it ends up ensuring it or not.
-    self.visible_pages = visible_pages
+    self.configurable.visible_pages = visible_pages
     local prev_visible_pages = self.ui.document:getVisiblePageCount()
     self.ui.document:setVisiblePageCount(visible_pages)
     local cur_visible_pages = self.ui.document:getVisiblePageCount()
@@ -1442,25 +1491,12 @@ function ReaderRolling:checkXPointersAndProposeDOMVersionUpgrade()
     local applyFuncToXPointersSlots = function(func)
         -- Last position
         func(self, "xpointer", "last position in book")
-        -- Bookmarks
-        if self.ui.bookmark and self.ui.bookmark.bookmarks and #self.ui.bookmark.bookmarks > 0 then
+        -- Annotations
+        if self.ui.annotation and self.ui.annotation.annotations and #self.ui.annotation.annotations > 0 then
             local slots = { "page", "pos0", "pos1" }
-            for _, bookmark in ipairs(self.ui.bookmark.bookmarks) do
+            for _, item in ipairs(self.ui.annotation.annotations) do
                 for _, slot in ipairs(slots) do
-                    func(bookmark, slot, bookmark.notes or "bookmark")
-                end
-            end
-        end
-        -- Highlights
-        if self.view.highlight and self.view.highlight.saved then
-            local slots = { "pos0", "pos1" }
-            for page, items in pairs(self.view.highlight.saved) do
-                if items and #items > 0 then
-                    for _, highlight in ipairs(items) do
-                        for _, slot in ipairs(slots) do
-                            func(highlight, slot, highlight.text or "highlight")
-                        end
-                    end
+                    func(item, slot, item.text or "annotation")
                 end
             end
         end
@@ -1506,6 +1542,9 @@ function ReaderRolling:checkXPointersAndProposeDOMVersionUpgrade()
         local new_xp = normalized_xpointers[xp]
         if new_xp then
             obj[slot] = new_xp
+            if slot == "page" then
+                self.ui.annotation:updateItemByXPointer(obj)
+            end
         else
             -- Let lost/not-found XPointer be. There is a small chance that
             -- it will be found (it it was made before the boxing code moved
@@ -1560,10 +1599,9 @@ function ReaderRolling:checkXPointersAndProposeDOMVersionUpgrade()
             g_block_rendering_mode = 3 -- default in ReaderTypeset:onReadSettings()
         end
         if g_block_rendering_mode ~= 0 then -- default is not "legacy"
-            -- This setting is actually saved by self.ui.document.configurable
-            local block_rendering_mode = self.ui.document.configurable.block_rendering_mode
+            local block_rendering_mode = self.configurable.block_rendering_mode
             if block_rendering_mode == 0 then
-                self.ui.document.configurable.block_rendering_mode = g_block_rendering_mode
+                self.configurable.block_rendering_mode = g_block_rendering_mode
                 logger.info("  block_rendering_mode switched to", g_block_rendering_mode)
             end
         end
@@ -1624,7 +1662,7 @@ Note that %1 (out of %2) xpaths from your bookmarks and highlights have been nor
         ok_text = _("Upgrade now"),
         ok_callback = function()
             -- Allow for ConfirmBox to be closed before migrating
-            UIManager:scheduleIn(0.5, function ()
+            UIManager:scheduleIn(0.5, function()
                 -- And check we haven't quit reader in these 0.5s
                 if self.ui.document then
                     -- We'd rather not have any painting between the upgrade

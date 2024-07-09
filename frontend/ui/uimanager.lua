@@ -39,8 +39,10 @@ local UIManager = {
     _refresh_func_stack = {},
     _entered_poweroff_stage = false,
     _exit_code = nil,
+    _gated_quit = nil,
     _prevent_standby_count = 0,
     _prev_prevent_standby_count = 0,
+    _input_gestures_disabled = false,
 
     event_hook = require("ui/hook_container"):new()
 }
@@ -60,16 +62,21 @@ function UIManager:init()
         UsbDevicePlugIn = function(input_event)
             -- Retrieve the argument set by Input:handleKeyBoardEv
             local evdev = table.remove(Input.fake_event_args[input_event])
-            self:broadcastEvent(Event:new("EvdevInputInsert", evdev))
+            local path = "/dev/input/event" .. tostring(evdev)
+
+            self:broadcastEvent(Event:new("EvdevInputInsert", path))
         end,
         UsbDevicePlugOut = function(input_event)
             local evdev = table.remove(Input.fake_event_args[input_event])
-            self:broadcastEvent(Event:new("EvdevInputRemove", evdev))
+            local path = "/dev/input/event" .. tostring(evdev)
+
+            self:broadcastEvent(Event:new("EvdevInputRemove", path))
         end,
     }
     self.poweroff_action = function()
         self._entered_poweroff_stage = true
         logger.info("Powering off the device...")
+        self:broadcastEvent(Event:new("PowerOff"))
         self:broadcastEvent(Event:new("Close"))
         local Screensaver = require("ui/screensaver")
         Screensaver:setup("poweroff", _("Powered off"))
@@ -87,6 +94,7 @@ function UIManager:init()
     self.reboot_action = function()
         self._entered_poweroff_stage = true
         logger.info("Rebooting the device...")
+        self:broadcastEvent(Event:new("Reboot"))
         self:broadcastEvent(Event:new("Close"))
         local Screensaver = require("ui/screensaver")
         Screensaver:setup("reboot", _("Rebooting…"))
@@ -102,11 +110,18 @@ function UIManager:init()
         end)
     end
 
-    Device:_setEventHandlers(self)
+    -- Tell Device that we're now available, so that it can setup PM event handlers
+    Device:_UIManagerReady(self)
 
     -- A simple wrapper for UIManager:quit()
     -- This may be overwritten by setRunForeverMode(); for testing purposes
     self:unsetRunForeverMode()
+end
+
+-- Crappy wrapper because of circular dependencies
+function UIManager:setIgnoreTouchInput(state)
+    local InputContainer = require("ui/widget/container/inputcontainer")
+    InputContainer:setIgnoreTouchInput(state)
 end
 
 --[[--
@@ -123,7 +138,7 @@ For more details about refreshtype, refreshregion & refreshdither see the descri
 If refreshtype is omitted, no refresh will be enqueued at this time.
 
 @param widget a @{ui.widget.widget|widget} object
-@string refreshtype `"full"`, `"flashpartial"`, `"flashui"`, `"[partial]"`, `"[ui]"`, `"partial"`, `"ui"`, `"fast"`, `"a2"` (optional)
+@string refreshtype `"color"`, `"colortext"`, `"full"`, `"flashpartial"`, `"flashui"`, `"[partial]"`, `"[ui]"`, `"partial"`, `"ui"`, `"fast"`, `"a2"` (optional)
 @param refreshregion a rectangle @{ui.geometry.Geom|Geom} object (optional, requires refreshtype to be set)
 @int x horizontal screen offset (optional, `0` if omitted)
 @int y vertical screen offset (optional, `0` if omitted)
@@ -161,6 +176,13 @@ function UIManager:show(widget, refreshtype, refreshregion, x, y, refreshdither)
     Input.disable_double_tap = widget.disable_double_tap ~= false
     -- a widget may override tap interval (when it doesn't, nil restores the default)
     Input.tap_interval_override = widget.tap_interval_override
+    -- If input was disabled, re-enable it while this widget is shown so we can actually interact with it.
+    -- The only thing that could actually call show in this state is something automatic, so we need to be able to deal with it.
+    if UIManager._input_gestures_disabled then
+        logger.dbg("Gestures were disabled, temporarily re-enabling them to allow interaction with widget")
+        self:setIgnoreTouchInput(false)
+        widget._restored_input_gestures = true
+    end
 end
 
 --[[--
@@ -173,7 +195,7 @@ For more details about refreshtype, refreshregion & refreshdither see the descri
 If refreshtype is omitted, no extra refresh will be enqueued at this time, leaving only those from the uncovered widgets.
 
 @param widget a @{ui.widget.widget|widget} object
-@string refreshtype `"full"`, `"flashpartial"`, `"flashui"`, `"[partial]"`, `"[ui]"`, `"partial"`, `"ui"`, `"fast"`, `"a2"` (optional)
+@string refreshtype `"color"`, `"colortext"`, `"full"`, `"flashpartial"`, `"flashui"`, `"[partial]"`, `"[ui]"`, `"partial"`, `"ui"`, `"fast"`, `"a2"` (optional)
 @param refreshregion a rectangle @{ui.geometry.Geom|Geom} object (optional, requires refreshtype to be set)
 @bool refreshdither `true` if the refresh requires dithering (optional, requires refreshtype to be set)
 @see setDirty
@@ -240,6 +262,10 @@ function UIManager:close(widget, refreshtype, refreshregion, refreshdither)
             self:setDirty(self._window_stack[i].widget)
         end
         self:_refresh(refreshtype, refreshregion, refreshdither)
+    end
+    if widget._restored_input_gestures then
+        logger.dbg("Widget is gone, disabling gesture handling again")
+        self:setIgnoreTouchInput(true)
     end
 end
 
@@ -438,6 +464,10 @@ It just appends stuff to the paint and/or refresh queues.
 
 Here's a quick rundown of what each refreshtype should be used for:
 
+* `color`: high-fidelity flashing refresh for color image content on Kaleido panels.
+           Maps to partial on unsupported devices, as such, better used conditionally behind a Device:hasKaleidoWfm check.
+* `colortext`: REAGL refresh for color text (e.g., highlights) on Kaleido panels.
+           Maps to partial on unsupported devices, as such, better used conditionally behind a Device:hasKaleidoWfm check.
 * `full`: high-fidelity flashing refresh (e.g., large images).
           Highest quality, but highest latency.
           Don't abuse if you only want a flash (in this case, prefer `flashui` or `flashpartial`).
@@ -536,7 +566,7 @@ UIManager:setDirty(self.widget, "partial", Geom:new{x=10,y=10,w=100,h=50})
 UIManager:setDirty(self.widget, function() return "ui", self.someelement.dimen end)
 
 @param widget a window-level widget object, `"all"`, or `nil`
-@param refreshtype `"full"`, `"flashpartial"`, `"flashui"`, `"[partial]"`, `"[ui]"`, `"partial"`, `"ui"`, `"fast"`, `"a2"` (or a lambda, see description above)
+@param refreshtype `"color"`, `"colortext"`, `"full"`, `"flashpartial"`, `"flashui"`, `"[partial]"`, `"[ui]"`, `"partial"`, `"ui"`, `"fast"`, `"a2"` (or a lambda, see description above)
 @param refreshregion a rectangle @{ui.geometry.Geom|Geom} object (optional, omitting it means the region will cover the full screen)
 @bool refreshdither `true` if widget requires dithering (optional)
 ]]
@@ -1028,7 +1058,7 @@ function UIManager:getElapsedTimeSinceBoot()
 end
 
 -- precedence of refresh modes:
-local refresh_modes = { a2 = 1, fast = 2, ui = 3, partial = 4, ["[ui]"] = 5, ["[partial]"] = 6, flashui = 7, flashpartial = 8, full = 9 }
+local refresh_modes = { a2 = 1, fast = 2, ui = 3, partial = 4, ["[ui]"] = 5, ["[partial]"] = 6, flashui = 7, flashpartial = 8, full = 9, colortext = 10, color = 11 }
 -- NOTE: We might want to introduce a "force_a2" that points to fast, but has the highest priority,
 --       for the few cases where we might *really* want to enforce fast (for stuff like panning or skimming?).
 -- refresh methods in framebuffer implementation
@@ -1042,6 +1072,8 @@ local refresh_methods = {
     flashui = Screen.refreshFlashUI,
     flashpartial = Screen.refreshFlashPartial,
     full = Screen.refreshFull,
+    colortext = Screen.refreshColorText,
+    color = Screen.refreshColor,
 }
 
 --[[
@@ -1079,7 +1111,7 @@ Widgets call this in their `paintTo()` method in order to notify
 UIManager that a certain part of the screen is to be refreshed.
 
 @string mode
-    refresh mode (`"full"`, `"flashpartial"`, `"flashui"`, `"[partial]"`, `"[ui]"`, `"partial"`, `"ui"`, `"fast"`, `"a2"`)
+    refresh mode (`"color"`, `"colortext"`, `"full"`, `"flashpartial"`, `"flashui"`, `"[partial]"`, `"[ui]"`, `"partial"`, `"ui"`, `"fast"`, `"a2"`)
 @param region
     A rectangle @{ui.geometry.Geom|Geom} object that specifies the region to be updated.
     Optional, update will affect whole screen if not specified.
@@ -1148,7 +1180,7 @@ function UIManager:_refresh(mode, region, dither)
     end
 
     -- if no region is specified, use the screen's dimensions
-    region = region or Geom:new{w=Screen:getWidth(), h=Screen:getHeight()}
+    region = region or Geom:new{x = 0, y = 0, w = Screen:getWidth(), h = Screen:getHeight()}
 
     -- if no dithering hint was specified, don't request dithering
     dither = dither or false
@@ -1417,11 +1449,13 @@ end
 
 -- Process all pending events on all registered ZMQs.
 function UIManager:processZMQs()
-    if self._zeromqs[1] then
-        self.event_hook:execute("InputEvent")
-    end
+    local sent_InputEvent = false
     for _, zeromq in ipairs(self._zeromqs) do
         for input_event in zeromq.waitEvent, zeromq do
+            if not sent_InputEvent then
+                self.event_hook:execute("InputEvent")
+                sent_InputEvent = true
+            end
             self:handleInputEvent(input_event)
         end
     end
@@ -1447,9 +1481,9 @@ function UIManager:handleInput()
 
         -- stop when we have no window to show
         if not self._window_stack[1] then
-            logger.info("no dialog left to show")
+            logger.info("UIManager: No dialogs left to show")
             if self:_gated_quit() ~= false then
-                return nil
+                return
             end
         end
 
@@ -1548,9 +1582,6 @@ This is the main loop of the UI controller.
 It is intended to manage input events and delegate them to dialogs.
 --]]
 function UIManager:run()
-    -- Tell PowerD that we're ready
-    Device:getPowerDevice():readyUI()
-
     self:initLooper()
     -- currently there is no Turbo support for Windows
     -- use our own main loop

@@ -1,5 +1,7 @@
 local Event = require("ui/event")
+local Geom = require("ui/geometry")
 local Generic = require("device/generic/device")
+local UIManager
 local SDL = require("ffi/SDL2_0")
 local ffi = require("ffi")
 local logger = require("logger")
@@ -25,8 +27,7 @@ local function isCommand(s)
 end
 
 local function runCommand(command)
-    local env = jit.os ~= "OSX" and 'env -u LD_LIBRARY_PATH ' or ""
-    return os.execute(env..command) == 0
+    return os.execute(command) == 0
 end
 
 local function getDesktopDicts()
@@ -67,8 +68,10 @@ local Device = Generic:extend{
     hasBattery = SDL.getPowerInfo,
     hasKeyboard = yes,
     hasKeys = yes,
+    hasSymKey = os.getenv("DISABLE_TOUCH") == "1" and yes or no,
     hasDPad = yes,
     hasWifiToggle = no,
+    hasSeamlessWifiToggle = no,
     isTouchDevice = yes,
     isDefaultFullscreen = no,
     needsScreenRefreshAfterResume = no,
@@ -105,9 +108,15 @@ local Device = Generic:extend{
     window = G_reader_settings:readSetting("sdl_window", {}),
 }
 
+function Device:otaModel()
+    if self.ota_model then
+        return self.ota_model, "link"
+    end
+end
+
 local AppImage = Device:extend{
     model = "AppImage",
-    hasMultitouch = no,
+    ota_model = "appimage",
     hasOTAUpdates = yes,
     isDesktop = yes,
 }
@@ -117,6 +126,12 @@ local Desktop = Device:extend{
     isDesktop = yes,
     canRestart = notOSX,
     hasExitOptions = notOSX,
+}
+
+local Flatpak = Device:extend{
+    model = "Flatpak",
+    isDesktop = yes,
+    canExternalDictLookup = no,
 }
 
 local Emulator = Device:extend{
@@ -170,6 +185,9 @@ function Device:init()
         y = self.window.top,
         is_always_portrait = self.isAlwaysPortrait(),
     }
+    -- Pickup the updated window sizes if they were enforced in S.open (we'll get the coordinates via the inital SDL_WINDOWEVENT_MOVED)...
+    self.window.width = self.screen.w
+    self.window.height = self.screen.h
     self.powerd = require("device/sdl/powerd"):new{device = self}
 
     local ok, re = pcall(self.screen.setWindowIcon, self.screen, "resources/koreader.png")
@@ -180,8 +198,7 @@ function Device:init()
         device = self,
         event_map = require("device/sdl/event_map_sdl2"),
         handleSdlEv = function(device_input, ev)
-            local Geom = require("ui/geometry")
-            local UIManager = require("ui/uimanager")
+
 
             -- SDL events can remain cdata but are almost completely transparent
             local SDL_TEXTINPUT = 771
@@ -227,12 +244,12 @@ function Device:init()
                 local fake_release_ev = Event:new("Gesture", fake_ges_release)
                 if scrolled_y == down then
                     fake_ges.direction = "north"
-                    UIManager:broadcastEvent(fake_pan_ev)
-                    UIManager:broadcastEvent(fake_release_ev)
+                    UIManager:sendEvent(fake_pan_ev)
+                    UIManager:sendEvent(fake_release_ev)
                 elseif scrolled_y == up then
                     fake_ges.direction = "south"
-                    UIManager:broadcastEvent(fake_pan_ev)
-                    UIManager:broadcastEvent(fake_release_ev)
+                    UIManager:sendEvent(fake_pan_ev)
+                    UIManager:sendEvent(fake_release_ev)
                 end
             elseif ev.code == SDL_MULTIGESTURE then
                 -- no-op for now
@@ -244,13 +261,14 @@ function Device:init()
                     ReaderUI:doShowReader(dropped_file_path)
                 end
             elseif ev.code == SDL_WINDOWEVENT_RESIZED then
-                device_input.device.screen.screen_size.w = ev.value.data1
-                device_input.device.screen.screen_size.h = ev.value.data2
                 device_input.device.screen.resize(device_input.device.screen, ev.value.data1, ev.value.data2)
                 self.window.width = ev.value.data1
                 self.window.height = ev.value.data2
 
                 local new_size = device_input.device.screen:getSize()
+                device_input.device.screen.screen_size.w = new_size.w
+                device_input.device.screen.screen_size.h = new_size.h
+
                 logger.dbg("Resizing screen to", new_size)
 
                 -- try to catch as many flies as we can
@@ -268,6 +286,9 @@ function Device:init()
                     FileManager.instance:reinit(FileManager.instance.path,
                         FileManager.instance.focused_file)
                 end
+
+                -- make sure dialogs are displayed
+                UIManager:setDirty("all", "ui")
             elseif ev.code == SDL_WINDOWEVENT_MOVED then
                 self.window.left = ev.value.data1
                 self.window.top = ev.value.data2
@@ -341,7 +362,11 @@ function Device:toggleFullscreen()
     end
 end
 
-function Device:setEventHandlers(UIManager)
+function Device:UIManagerReady(uimgr)
+    UIManager = uimgr
+end
+
+function Device:setEventHandlers(uimgr)
     if not self:canSuspend() then
         -- If we can't suspend, we have no business even trying to, as we may not have overloaded `Device:simulateResume`.
         -- Instead, rely on the Generic Suspend/Resume handlers.
@@ -349,17 +374,19 @@ function Device:setEventHandlers(UIManager)
     end
 
     UIManager.event_handlers.Suspend = function()
-        self:_beforeSuspend()
         self:simulateSuspend()
     end
     UIManager.event_handlers.Resume = function()
         self:simulateResume()
-        self:_afterResume()
     end
     UIManager.event_handlers.PowerRelease = function()
         -- Resume if we were suspended
         if self.screen_saver_mode then
-            UIManager.event_handlers.Resume()
+            if self.screen_saver_lock then
+                UIManager.event_handlers.Suspend()
+            else
+                UIManager.event_handlers.Resume()
+            end
         else
             UIManager.event_handlers.Suspend()
         end
@@ -384,30 +411,36 @@ function Emulator:simulateSuspend()
     local Screensaver = require("ui/screensaver")
     Screensaver:setup()
     Screensaver:show()
+
+    self.powerd:beforeSuspend()
 end
 
 function Emulator:simulateResume()
     local Screensaver = require("ui/screensaver")
     Screensaver:close()
+
+    self.powerd:afterResume()
 end
 
 -- fake network manager for the emulator
 function Emulator:initNetworkManager(NetworkMgr)
-    local UIManager = require("ui/uimanager")
-    local connectionChangedEvent = function()
+    local connectionChangedEvent = function(complete_callback)
         if G_reader_settings:nilOrTrue("emulator_fake_wifi_connected") then
             UIManager:broadcastEvent(Event:new("NetworkConnected"))
         else
             UIManager:broadcastEvent(Event:new("NetworkDisconnected"))
         end
+        if complete_callback then
+            complete_callback()
+        end
     end
     function NetworkMgr:turnOffWifi(complete_callback)
         G_reader_settings:flipNilOrTrue("emulator_fake_wifi_connected")
-        UIManager:scheduleIn(2, connectionChangedEvent)
+        UIManager:scheduleIn(2, connectionChangedEvent, complete_callback)
     end
     function NetworkMgr:turnOnWifi(complete_callback)
         G_reader_settings:flipNilOrTrue("emulator_fake_wifi_connected")
-        UIManager:scheduleIn(2, connectionChangedEvent)
+        UIManager:scheduleIn(2, connectionChangedEvent, complete_callback)
     end
     function NetworkMgr:isWifiOn()
         return G_reader_settings:nilOrTrue("emulator_fake_wifi_connected")
@@ -420,6 +453,8 @@ io.write("Starting SDL in " .. SDL.getBasePath() .. "\n")
 -------------- device probe ------------
 if os.getenv("APPIMAGE") then
     return AppImage
+elseif os.getenv("FLATPAK") then
+    return Flatpak
 elseif os.getenv("KO_MULTIUSER") then
     return Desktop
 elseif os.getenv("UBUNTU_APPLICATION_ISOLATION") then

@@ -150,7 +150,7 @@ function datetime.secondsToHClock(seconds, withoutSeconds, hmsFormat, withDays, 
                 if compact then
                     return T(C_("Time", "%1s"), string.format("%d", seconds))
                 else
-                    return T(C_("Time", "%1m\xE2\x80\x89%2s"), "0", string.format("%d", seconds))
+                    return T(C_("Time", "%1m\xE2\x80\x89%2s"), "0", string.format("%d", seconds)) -- use a thin space
                 end
             else
                 if compact then
@@ -178,13 +178,13 @@ function datetime.secondsToHClock(seconds, withoutSeconds, hmsFormat, withDays, 
 
         if hmsFormat then
             time_string = time_string:gsub("0(%d)", "%1") -- delete all leading "0"s
-            time_string = time_string:gsub(C_("Time", "d"), C_("Time", "d") .. "\xE2\x80\x89") -- add thin space after "d"
-            time_string = time_string:gsub(C_("Time", "h"), C_("Time", "h") .. "\xE2\x80\x89") -- add thin space after "h"
+            time_string = time_string:gsub(C_("Time", "d"), C_("Time", "d") .. "\u{2009}") -- add thin space after "d"
+            time_string = time_string:gsub(C_("Time", "h"), C_("Time", "h") .. "\u{2009}") -- add thin space after "h"
             if not withoutSeconds then
-                time_string = time_string:gsub(C_("Time", "m"), C_("Time", "m") .. "\xE2\x80\x89") .. C_("Time", "s")  -- add thin space after "m"
+                time_string = time_string:gsub(C_("Time", "m"), C_("Time", "m") .. "\u{2009}") .. C_("Time", "s")  -- add thin space after "m"
             end
             if compact then
-                time_string = time_string:gsub("\xE2\x80\x89", "\xE2\x80\x8A") -- replace thin space with hair space
+                time_string = time_string:gsub("\u{2009}", "\u{200A}") -- replace thin space with hair space
             end
             return time_string
         else
@@ -305,6 +305,15 @@ function datetime.secondsToDateTime(seconds, twelve_hour_clock, use_locale)
     -- @translators Use the following placeholders in the desired order: %1 date, %2 time
     local message_text = T(C_("Date string", "%1 %2"), BD.wrap(date_string), BD.wrap(time_string))
     return message_text
+end
+
+--- Converts a date+time string to seconds
+---- @string "YYYY-MM-DD HH:MM:SS", time may be absent
+---- @treturn seconds
+function datetime.stringToSeconds(datetime_string)
+    local year, month, day = datetime_string:match("(%d+)-(%d+)-(%d+)")
+    local hour, min, sec   = datetime_string:match("(%d+):(%d+):(%d+)")
+    return os.time({ year = year, month = month, day = day, hour = hour or 0, min = min or 0, sec = sec or 0 })
 end
 
 return datetime

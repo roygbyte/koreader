@@ -14,6 +14,7 @@ local A, android = pcall(require, "android")  -- luacheck: ignore
 local Blitbuffer = require("ffi/blitbuffer")
 local ConfirmBox = require("ui/widget/confirmbox")
 local DataStorage = require("datastorage")
+local FileManagerBookInfo = require("apps/filemanager/filemanagerbookinfo")
 local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
 local PathChooser = require("ui/widget/pathchooser")
@@ -110,10 +111,11 @@ end
 
 function CoverImage:createCoverImage(doc_settings)
     if self:coverEnabled() and doc_settings:nilOrFalse("exclude_cover_image") then
-        local cover_image = self.ui.document:getCoverPageImage()
+        local cover_image, custom_cover = FileManagerBookInfo:getCoverImage(self.ui.document)
         if cover_image then
-            local cache_file = self:getCacheFile()
+            local cache_file = self:getCacheFile(custom_cover)
             if lfs.attributes(cache_file, "mode") == "file" then
+                logger.dbg("CoverImage: cache file already exists")
                 ffiutil.copyFile(cache_file, self.cover_image_path)
                 lfs.touch(cache_file) -- update date
                 return
@@ -122,6 +124,14 @@ function CoverImage:createCoverImage(doc_settings)
             local s_w, s_h = Screen:getWidth(), Screen:getHeight()
             local i_w, i_h = cover_image:getWidth(), cover_image:getHeight()
             local scale_factor = math.min(s_w / i_w, s_h / i_h)
+
+            if Screen:getRotationMode() == Screen.DEVICE_ROTATED_UPSIDE_DOWN
+                or Screen:getRotationMode() == Screen.DEVICE_ROTATED_CLOCKWISE then
+
+                local flipped_cover = cover_image:rotatedCopy(180)
+                cover_image:free()
+                cover_image = flipped_cover
+            end
 
             if self.cover_image_background == "none" or scale_factor == 1 then
                 local act_format = self.cover_image_format == "auto" and getExtension(self.cover_image_path) or self.cover_image_format
@@ -198,6 +208,11 @@ function CoverImage:onReaderReady(doc_settings)
     self:createCoverImage(doc_settings)
 end
 
+function CoverImage:onSetRotationMode(rotation)
+    logger.dbg("CoverImage: onSetRotationMode", rotation)
+    self:createCoverImage(self.ui.doc_settings)
+end
+
 function CoverImage:fallbackEnabled()
     return self.fallback and isFileOk(self.cover_image_fallback_path)
 end
@@ -210,11 +225,13 @@ end
 -- cache handling functions
 ---------------------------
 
-function CoverImage:getCacheFile()
+function CoverImage:getCacheFile(custom_cover)
+    local custom_cover_mtime = custom_cover and lfs.attributes(custom_cover, "modification") or ""
     local dummy, document_name = util.splitFilePathName(self.ui.document.file)
     -- use document_name here. Title may contain characters not allowed on every filesystem (esp. vfat on /sdcard)
-    local key = document_name .. "_" .. self.cover_image_quality .. "_" .. self.cover_image_stretch_limit .. "_"
-        .. self.cover_image_background .. "_" .. self.cover_image_format .. "_" .. tostring(self.cover_image_grayscale)
+    local key = document_name .. custom_cover_mtime .. self.cover_image_quality .. self.cover_image_stretch_limit
+        .. self.cover_image_background .. self.cover_image_format .. tostring(self.cover_image_grayscale)
+        .. Screen:getRotationMode()
 
     return self.cover_image_cache_path .. self.cover_image_cache_prefix .. md5(key) .. "." .. getExtension(self.cover_image_path)
 end
@@ -468,7 +485,9 @@ function CoverImage:menuEntryCache()
                     end
                     return T(_("Maximum number of cached covers: %1"), number)
                 end,
-                help_text = _("If set to zero the number of cache files is unlimited.\nIf set to -1 the cache is disabled."),
+                help_text = string.format("%s\n\n%s",
+                    _("If set to zero the number of cache files is unlimited.\nIf set to -1 the cache is disabled."),
+                    _("Each screen orientation requires its own cache file.")),
                 checked_func = function()
                     return self.cover_image_cache_maxfiles >= 0
                 end,

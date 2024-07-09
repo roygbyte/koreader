@@ -5,7 +5,6 @@ It it used by ReaderHighlight as an action after text selection.
 
 local BD = require("ui/bidi")
 local Device = require("device")
-local Font = require("ui/font")
 local InfoMessage = require("ui/widget/infomessage")
 local Notification = require("ui/widget/notification")
 local TextViewer = require("ui/widget/textviewer")
@@ -30,7 +29,7 @@ local ViewHtml = {
 
         -- Or additionally show unicode codepoint of each char
         { _("Switch to unicode debug view"), 0xEB5E, true },
-    }
+    },
 }
 
 -- Main entry point
@@ -63,7 +62,7 @@ function ViewHtml:_viewSelectionHTML(document, selected_text, view, with_css_fil
     local replace_in_html = function(pat, repl)
         local new_html = ""
         local is_match = false -- given the html we get and our patterns, we know the first part won't be a match
-        for part in util.gsplit(html, pat, true) do
+        for part in util.gsplit(html, pat, true, true) do
             if is_match then
                 local r = type(repl) == "function" and repl(part) or repl
                 local offset_shift = #r - #part
@@ -72,6 +71,8 @@ function ViewHtml:_viewSelectionHTML(document, selected_text, view, with_css_fil
                 end
                 new_html = new_html .. r
             else
+                -- (we provided capture_empty_entity=true, to match adjacent 'pat',
+                -- so here we may get empty 'part', that we can just concatenate)
                 new_html = new_html .. part
             end
             is_match = not is_match
@@ -80,8 +81,8 @@ function ViewHtml:_viewSelectionHTML(document, selected_text, view, with_css_fil
     end
     if massage_html then
         -- Make some invisible chars visible
-        replace_in_html("\xC2\xA0", "␣")  -- no break space: open box
-        replace_in_html("\xC2\xAD", "⋅") -- soft hyphen: dot operator (smaller than middle dot ·)
+        replace_in_html("\u{00A0}", "\u{2423}") -- no break space: open box
+        replace_in_html("\u{00AD}", "\u{22C5}") -- soft hyphen: dot operator (smaller than middle dot ·)
         -- Prettify inlined CSS (from <HEAD>, put in an internal
         -- <body><stylesheet> element by crengine (the opening tag may
         -- include some href=, or end with " ~X>" with some html_flags)
@@ -90,7 +91,7 @@ function ViewHtml:_viewSelectionHTML(document, selected_text, view, with_css_fil
         -- pages to get to the HTML content on the initial view.)
     end
     if massage_html or hide_stylesheet_elem_content then
-        replace_in_html("<stylesheet[^>]*>(.-)</stylesheet>", function(s)
+        replace_in_html("<stylesheet[^>]*>.-</stylesheet>", function(s)
             local pre, css_text, post = s:match("(<stylesheet[^>]*>)%s*(.-)%s*(</stylesheet>)")
             if hide_stylesheet_elem_content then
                 return pre .. "[...]" .. post
@@ -98,6 +99,10 @@ function ViewHtml:_viewSelectionHTML(document, selected_text, view, with_css_fil
             return pre .. "\n" .. util.prettifyCSS(css_text) .. post
         end)
     end
+    -- Make sure we won't get wrapped just after our indentation if there is no break opportunity later
+    replace_in_html("\n *", function(s)
+        return "\n" .. ("\u{00A0}"):rep(#s - 1)
+    end)
 
     local textviewer
     -- Prepare bottom buttons and their actions
@@ -118,8 +123,7 @@ function ViewHtml:_viewSelectionHTML(document, selected_text, view, with_css_fil
                     cssviewer = TextViewer:new{
                         title = css_files[i],
                         text = css_text or _("Failed getting CSS content"),
-                        text_face = Font:getFace("smallinfont"),
-                        justified = false,
+                        text_type = "code",
                         para_direction_rtl = false,
                         auto_para_direction = false,
                         add_default_buttons = true,
@@ -132,8 +136,7 @@ function ViewHtml:_viewSelectionHTML(document, selected_text, view, with_css_fil
                                     UIManager:show(TextViewer:new{
                                         title = css_files[i],
                                         text = util.prettifyCSS(css_text),
-                                        text_face = Font:getFace("smallinfont"),
-                                        justified = false,
+                                        text_type = "code",
                                         para_direction_rtl = false,
                                         auto_para_direction = false,
                                     })
@@ -179,8 +182,7 @@ function ViewHtml:_viewSelectionHTML(document, selected_text, view, with_css_fil
     textviewer = TextViewer:new{
         title = _("Selection HTML"),
         text = html,
-        text_face = Font:getFace("smallinfont"),
-        justified = false,
+        text_type = "code",
         para_direction_rtl = false,
         auto_para_direction = false,
         add_default_buttons = true,
@@ -353,16 +355,24 @@ function ViewHtml:_handleLongPress(document, css_selectors_offsets, offset_shift
         callback = function()
             self:_showMatchingSelectors(document, ancestors, false)
         end,
+        hold_callback = function()
+            -- skip main stylesheet and style tweaks
+            self:_showMatchingSelectors(document, ancestors, false, false)
+        end,
     }})
     table.insert(copy_buttons, {{
         text = _("Show matched stylesheets rules (all ancestors)"),
         callback = function()
             self:_showMatchingSelectors(document, ancestors, true)
         end,
+        hold_callback = function()
+            -- skip main stylesheet and style tweaks
+            self:_showMatchingSelectors(document, ancestors, true, false)
+        end,
     }})
 
-    local ButtonDialogTitle = require("ui/widget/buttondialogtitle")
-    local widget = ButtonDialogTitle:new{
+    local ButtonDialog = require("ui/widget/buttondialog")
+    local widget = ButtonDialog:new{
         title = _("Copy to clipboard:"),
         title_align = "center",
         width_factor = 0.8,
@@ -372,11 +382,11 @@ function ViewHtml:_handleLongPress(document, css_selectors_offsets, offset_shift
     UIManager:show(widget)
 end
 
-function ViewHtml:_showMatchingSelectors(document, ancestors, show_all_ancestors)
+function ViewHtml:_showMatchingSelectors(document, ancestors, show_all_ancestors, with_main_stylesheet)
     local snippets
     if not show_all_ancestors then
         local node_dataindex = ancestors[1][2]
-        snippets = document:getStylesheetsMatchingRulesets(node_dataindex)
+        snippets = document:getStylesheetsMatchingRulesets(node_dataindex, with_main_stylesheet)
     else
         snippets = {}
         local elements = {}
@@ -391,8 +401,11 @@ function ViewHtml:_showMatchingSelectors(document, ancestors, show_all_ancestors
                 table.insert(snippets, "")
             end
             local desc = table.concat(elements, " > ", 1, #ancestors - i + 1)
-            table.insert(snippets, "/* ====== " .. desc .. " */")
-            util.arrayAppend(snippets, document:getStylesheetsMatchingRulesets(node_dataindex))
+            -- We use Unicode solid black blocks to make these really visible
+            table.insert(snippets, "/* \u{259B}" .. ("\u{2580}"):rep(20) .. " */")
+            table.insert(snippets, "/* \u{258C}" .. desc .. " */")
+            table.insert(snippets, "/* \u{2599}" .. ("\u{2584}"):rep(20) .. " */")
+            util.arrayAppend(snippets, document:getStylesheetsMatchingRulesets(node_dataindex, with_main_stylesheet))
         end
     end
 
@@ -403,8 +416,7 @@ function ViewHtml:_showMatchingSelectors(document, ancestors, show_all_ancestors
     cssviewer = TextViewer:new{
         title = title,
         text = css_text or _("No matching rulesets"),
-        text_face = Font:getFace("smallinfont"),
-        justified = false,
+        text_type = "code",
         para_direction_rtl = false,
         auto_para_direction = false,
         add_default_buttons = true,
@@ -417,8 +429,7 @@ function ViewHtml:_showMatchingSelectors(document, ancestors, show_all_ancestors
                     UIManager:show(TextViewer:new{
                         title = title,
                         text = util.prettifyCSS(css_text),
-                        text_face = Font:getFace("smallinfont"),
-                        justified = false,
+                        text_type = "code",
                         para_direction_rtl = false,
                         auto_para_direction = false,
                     })

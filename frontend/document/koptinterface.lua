@@ -12,13 +12,18 @@ local FFIUtil = require("ffi/util")
 local Geom = require("ui/geometry")
 local KOPTContext = require("ffi/koptcontext")
 local Persist = require("persist")
+local TextBoxWidget = require("ui/widget/textboxwidget")
 local TileCacheItem = require("document/tilecacheitem")
+local Utf8Proc = require("ffi/utf8proc")
 local logger = require("logger")
 local util = require("util")
 
 local KoptInterface = {
     ocrengine = "ocrengine",
-    tessocr_data = DataStorage:getDataDir() .. "/data",
+    -- If `$TESSDATA_PREFIX` is set, don't override it: let libk2pdfopt honor it
+    -- (which includes checking for data in both `$TESSDATA_PREFIX/tessdata` and
+    -- in `$TESSDATA_PREFIX/` on more recent versions).
+    tessocr_data = not os.getenv('TESSDATA_PREFIX') and DataStorage:getDataDir().."/data/tessdata" or nil,
     ocr_lang = "eng",
     ocr_type = 3, -- default 0, for more accuracy use 3
     last_context_size = nil,
@@ -143,7 +148,8 @@ function KoptInterface:createContext(doc, pageno, bbox)
     kc:setZoom(doc.configurable.font_size)
     kc:setMargin(doc.configurable.page_margin)
     kc:setQuality(doc.configurable.quality)
-    kc:setContrast(doc.configurable.contrast)
+    -- k2pdfopt (for reflowing) and mupdf use different algorithms to apply gamma when rendering
+    kc:setContrast(1 / doc.configurable.contrast)
     kc:setDefectSize(doc.configurable.defect_size)
     kc:setLineSpacing(doc.configurable.line_spacing)
     kc:setWordSpacing(doc.configurable.word_spacing)
@@ -945,7 +951,7 @@ function KoptInterface:getTextFromBoxes(boxes, pos0, pos1)
                             -- Previous line ended with a minus.
                             -- Assume it's some hyphenation and discard it.
                             line_text = line_text:sub(1, -2)
-                        elseif line_text:sub(-2, -1) == "\xC2\xAD" then
+                        elseif line_text:sub(-2, -1) == "\u{00AD}" then
                             -- Previous line ended with a hyphen.
                             -- Assume it's some hyphenation and discard it.
                             line_text = line_text:sub(1, -3)
@@ -1061,6 +1067,10 @@ function KoptInterface:getWordFromReflowPosition(doc, boxes, pos)
     local pageno = pos.page
 
     local scratch_reflowed_page_boxes = self:getReflowedTextBoxesFromScratch(doc, pageno)
+    if not DEBUG.dassert(scratch_reflowed_page_boxes and next(scratch_reflowed_page_boxes) ~= nil, "scratch_reflowed_page_boxes shouldn't be nil/{}") then
+        return
+    end
+
     local scratch_reflowed_word_box = self:getWordFromBoxes(scratch_reflowed_page_boxes, pos)
 
     local reflowed_page_boxes = self:getReflowedTextBoxes(doc, pageno)
@@ -1095,49 +1105,60 @@ function KoptInterface:getWordFromNativePosition(doc, boxes, pos)
     return word_box
 end
 
-function KoptInterface:getSelectedWordContext(word, nb_words, pos)
-    local boxes = self.last_text_boxes
-    if not pos or not boxes or #boxes == 0 then return end
-    local i, j = getWordBoxIndices(boxes, pos)
-    if boxes[i][j].word ~= word then return end
-
-    local li, wi = i, j
-    local prev_count, next_count = 0, 0
-    local prev_text, next_text = {}, {}
+local function get_prev_text(boxes, i, j, nb_words)
+    local prev_count = 0
+    local prev_text = {}
     while prev_count < nb_words do
-        if li == 1 and wi == 1 then
+        if i == 1 and j == 1 then
             break
-        elseif wi == 1 then
-            li = li - 1
-            wi = #boxes[li]
+        elseif j == 1 then
+            i = i - 1
+            j = #boxes[i]
         else
-            wi = wi - 1
+            j = j - 1
         end
-        local current_word = boxes[li][wi].word
+        local current_word = boxes[i][j].word
         if #current_word > 0 then
             table.insert(prev_text, 1, current_word)
             prev_count = prev_count + 1
         end
     end
+    if #prev_text > 0 then
+        return table.concat(prev_text, " ")
+    end
+end
 
-    li, wi = i, j
+local function get_next_text(boxes, i, j, nb_words)
+    local next_count = 0
+    local next_text = {}
     while next_count < nb_words do
-        if li == #boxes and wi == #boxes[li] then
+        if i == #boxes and j == #boxes[i] then
             break
-        elseif wi == #boxes[li] then
-            li = li + 1
-            wi = 1
+        elseif j == #boxes[i] then
+            i = i + 1
+            j = 1
         else
-            wi = wi + 1
+            j = j + 1
         end
-        local current_word = boxes[li][wi].word
+        local current_word = boxes[i][j].word
         if #current_word > 0 then
             table.insert(next_text, current_word)
             next_count = next_count + 1
         end
     end
-    if #prev_text == 0 and #next_text == 0 then return end
-    return table.concat(prev_text, " "), table.concat(next_text, " ")
+    if #next_text > 0 then
+        return table.concat(next_text, " ")
+    end
+end
+
+function KoptInterface:getSelectedWordContext(word, nb_words, pos)
+    local boxes = self.last_text_boxes
+    if not pos or not boxes or #boxes == 0 then return end
+    local i, j = getWordBoxIndices(boxes, pos)
+    if boxes[i][j].word ~= word then return end
+    local prev_text = get_prev_text(boxes, i, j, nb_words)
+    local next_text = get_next_text(boxes, i, j, nb_words)
+    return prev_text, next_text
 end
 
 --[[--
@@ -1223,8 +1244,15 @@ function KoptInterface:getTextFromReflowPositions(doc, native_boxes, pos0, pos1)
     local reflowed_page_boxes = self:getReflowedTextBoxes(doc, pageno)
 
     local scratch_reflowed_word_box0 = self:getWordFromBoxes(scratch_reflowed_page_boxes, pos0)
+    if not DEBUG.dassert(scratch_reflowed_word_box0 and next(scratch_reflowed_word_box0) ~= nil, "scratch_reflowed_word_box0 shouldn't be nil/{}") then
+        return
+    end
     local reflowed_word_box0 = self:getWordFromBoxes(reflowed_page_boxes, pos0)
+
     local scratch_reflowed_word_box1 = self:getWordFromBoxes(scratch_reflowed_page_boxes, pos1)
+    if not DEBUG.dassert(scratch_reflowed_word_box1 and next(scratch_reflowed_word_box1) ~= nil, "scratch_reflowed_word_box1 shouldn't be nil/{}") then
+        return
+    end
     local reflowed_word_box1 = self:getWordFromBoxes(reflowed_page_boxes, pos1)
 
     local reflowed_pos_abs0 = scratch_reflowed_word_box0.box:center()
@@ -1334,21 +1362,29 @@ function KoptInterface:nativeToPageRectTransform(doc, pageno, rect)
     end
 end
 
-local function all_matches(boxes, pattern, caseInsensitive)
+local function get_pattern_list(pattern, case_insensitive)
     -- pattern list of single words
     local plist = {}
-    -- split utf-8 characters
-    for words in pattern:gmatch("[\32-\127\192-\255]+[\128-\191]*") do
-        -- split space seperated words
-        for word in words:gmatch("[^%s]+") do
-            table.insert(plist, caseInsensitive and word:lower() or word)
+    -- (as in util.splitToWords(), but only splitting on spaces, keeping punctuations)
+    for word in util.gsplit(pattern, "%s+") do
+        if util.hasCJKChar(word) then
+            for char in util.gsplit(word, "[\192-\255][\128-\191]+", true) do
+                table.insert(plist, case_insensitive and Utf8Proc.lowercase(util.fixUtf8(char, "?")) or char)
+            end
+        else
+            table.insert(plist, case_insensitive and Utf8Proc.lowercase(util.fixUtf8(word, "?")) or word)
         end
     end
+    return plist
+end
+
+local function all_matches(boxes, plist, case_insensitive)
+    local pnb = #plist
     -- return mached word indices from index i, j
     local function match(i, j)
         local pindex = 1
         local matched_indices = {}
-        if #plist == 0 then return end
+        if pnb == 0 then return end
         while true do
             if #boxes[i] < j then
                 j = j - #boxes[i]
@@ -1356,10 +1392,27 @@ local function all_matches(boxes, pattern, caseInsensitive)
             end
             if i > #boxes then break end
             local box = boxes[i][j]
-            local word = caseInsensitive and box.word:lower() or box.word
-            if word:match(plist[pindex]) then
+            local word = case_insensitive and Utf8Proc.lowercase(util.fixUtf8(box.word, "?")) or box.word
+            local pword = plist[pindex]
+            local matched
+            if pnb == 1 then -- single word in plist
+                matched = word:find(pword, 1, true)
+            else -- multiple words in plist
+                if pindex == 1 then
+                    -- first word of query should match at end of a word from the document
+                   matched = word:sub(-#pword) == pword
+                elseif pindex == pnb then
+                    -- last word of query should match at start of the word from the document
+                    matched = word:sub(1, #pword) == pword
+                else
+                    -- middle words in query should match exactly the word from the document
+                    matched = word == pword
+                end
+            end
+            if matched then
                 table.insert(matched_indices, {i, j})
-                if pindex == #plist then
+                if pindex == pnb then
+                    -- all words in plist iterated, all matched
                     return matched_indices
                 else
                     j = j + 1
@@ -1370,6 +1423,8 @@ local function all_matches(boxes, pattern, caseInsensitive)
             end
         end
     end
+    -- Note that this returns a full word box, even if what matches
+    -- is only a substring of a word box.
     return coroutine.wrap(function()
         for i, line in ipairs(boxes) do
             for j, box in ipairs(line) do
@@ -1382,11 +1437,12 @@ local function all_matches(boxes, pattern, caseInsensitive)
     end)
 end
 
-function KoptInterface:findAllMatches(doc, pattern, caseInsensitive, page)
+function KoptInterface:findAllMatches(doc, pattern, case_insensitive, page)
     local text_boxes = doc:getPageTextBoxes(page)
     if not text_boxes then return end
+    local plist = get_pattern_list(pattern, case_insensitive)
     local matches = {}
-    for indices in all_matches(text_boxes or {}, pattern, caseInsensitive) do
+    for indices in all_matches(text_boxes, plist, case_insensitive) do
         for _, index in ipairs(indices) do
             local i, j = unpack(index)
             local word = text_boxes[i][j]
@@ -1402,8 +1458,8 @@ function KoptInterface:findAllMatches(doc, pattern, caseInsensitive, page)
     return matches
 end
 
-function KoptInterface:findText(doc, pattern, origin, reverse, caseInsensitive, pageno)
-    logger.dbg("Koptinterface: find text", pattern, origin, reverse, caseInsensitive, pageno)
+function KoptInterface:findText(doc, pattern, origin, reverse, case_insensitive, pageno)
+    logger.dbg("Koptinterface: find text", pattern, origin, reverse, case_insensitive, pageno)
     local last_pageno = doc:getPageCount()
     local start_page, end_page
     if reverse == 1 then
@@ -1431,11 +1487,66 @@ function KoptInterface:findText(doc, pattern, origin, reverse, caseInsensitive, 
         end
     end
     for i = start_page, end_page, (reverse == 1) and -1 or 1 do
-        local matches = self:findAllMatches(doc, pattern, caseInsensitive, i)
+        local matches = self:findAllMatches(doc, pattern, case_insensitive, i)
         if #matches > 0 then
             matches.page = i
             return matches
         end
+    end
+end
+
+function KoptInterface:findAllText(doc, pattern, case_insensitive, nb_context_words, max_hits)
+    local plist = get_pattern_list(pattern, case_insensitive)
+    local res = {}
+    for page = 1, doc:getPageCount() do
+        local text_boxes = doc:getPageTextBoxes(page)
+        if text_boxes then
+            for indices in all_matches(text_boxes, plist, case_insensitive) do -- each found pattern in the page
+                local res_item = { -- item of the Menu item_table
+                    text = nil,
+                    mandatory = page,
+                    boxes = {}, -- to draw temp highlight in onMenuSelect
+                }
+                local text = {}
+                local i_prev, j_prev, i_next, j_next
+                for ind, index in ipairs(indices) do -- each word in the pattern
+                    local i, j = unpack(index)
+                    local word = text_boxes[i][j]
+                    res_item.boxes[ind] = {
+                        x = word.x0, y = word.y0,
+                        w = word.x1 - word.x0,
+                        h = word.y1 - word.y0,
+                    }
+                    text[ind] = word.word
+                    if ind == 1 then
+                        i_prev, j_prev = i, j
+                    end
+                    if ind == #indices then
+                        i_next, j_next = i, j
+                    end
+                end
+                -- Make this word bolder, using Poor Text Formatting provided by TextBoxWidget
+                -- (we know this text ends up in a TextBoxWidget).
+                text = TextBoxWidget.PTF_BOLD_START .. table.concat(text, " ") .. TextBoxWidget.PTF_BOLD_END
+                local prev_text = get_prev_text(text_boxes, i_prev, j_prev, nb_context_words)
+                if prev_text then
+                    text = prev_text .. " " .. text
+                end
+                local next_text = get_next_text(text_boxes, i_next, j_next, nb_context_words)
+                if next_text then
+                    text = text .. " " .. next_text
+                end
+                text = TextBoxWidget.PTF_HEADER .. text -- enable handling of our bold tags
+                res_item.text = text
+                table.insert(res, res_item)
+                if #res == max_hits then
+                    return res
+                end
+            end
+        end
+    end
+    if #res > 0 then
+        return res
     end
 end
 

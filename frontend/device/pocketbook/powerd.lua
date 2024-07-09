@@ -41,6 +41,9 @@ function PocketBookPowerD:setIntensityHW(intensity)
     else
         inkview.SetFrontlightState(intensity)
     end
+
+    -- We have a custom isFrontlightOn implementation, so this is redundant
+    self:_decideFrontlightState()
 end
 
 function PocketBookPowerD:isFrontlightOn()
@@ -71,6 +74,18 @@ function PocketBookPowerD:isChargingHW()
     else
         return false
     end
+end
+
+function PocketBookPowerD:beforeSuspend()
+    -- Inhibit user input and emit the Suspend event.
+    self.device:_beforeSuspend()
+end
+
+function PocketBookPowerD:afterResume()
+    self:invalidateCapacityCache()
+
+    -- Restore user input and emit the Resume event.
+    self.device:_afterResume()
 end
 
 return PocketBookPowerD

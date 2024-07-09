@@ -45,8 +45,9 @@ function ReaderMenu:init()
             remember = false,
             callback = function()
                 self:onTapCloseMenu()
+                local file = self.ui.document.file
                 self.ui:onClose()
-                self.ui:showFileManager()
+                self.ui:showFileManager(file)
             end,
         },
         main = {
@@ -95,7 +96,7 @@ function ReaderMenu:getPreviousFile()
     return require("readhistory"):getPreviousFile(self.ui.document.file)
 end
 
-function ReaderMenu:onReaderReady()
+function ReaderMenu:initGesListener()
     if not Device:isTouchDevice() then return end
 
     local DTAP_ZONE_MENU = G_defaults:readSetting("DTAP_ZONE_MENU")
@@ -179,6 +180,8 @@ function ReaderMenu:onReaderReady()
     })
 end
 
+ReaderMenu.onReaderReady = ReaderMenu.initGesListener
+
 function ReaderMenu:setUpdateItemTable()
     for _, widget in pairs(self.registered_widgets) do
         local ok, err = pcall(widget.addToMainMenu, widget, self.menu_items)
@@ -237,10 +240,12 @@ function ReaderMenu:setUpdateItemTable()
     end
 
     if Device:isTouchDevice() then
+        -- Settings > Taps & Gestures; mostly concerns touch related page turn stuff, and only applies to Reader
         self.menu_items.page_turns = require("ui/elements/page_turns")
-    else
-        -- Placed elsewhere than in Taps and gestures, with only a subset of menu items.
-        self.menu_items.page_turns_non_touch = require("ui/elements/page_turns")
+    end
+    -- Settings > Navigation; while also related to page turns, this mostly concerns physical keys, and applies *everywhere*
+    if Device:hasKeys() then
+        self.menu_items.physical_buttons_setup = require("ui/elements/physical_buttons")
     end
     -- insert DjVu render mode submenu just before the last entry (show advanced)
     -- this is a bit of a hack
@@ -250,7 +255,7 @@ function ReaderMenu:setUpdateItemTable()
 
     if Device:supportsScreensaver() then
         local ss_book_settings = {
-            text = _("Exclude this book's content and cover from screensaver"),
+            text = _("Do not show this book cover on sleep screen"),
             enabled_func = function()
                 if self.ui and self.ui.document then
                     local screensaverType = G_reader_settings:readSetting("screensaver_type")
@@ -281,7 +286,7 @@ function ReaderMenu:setUpdateItemTable()
         end
         table.insert(screensaver_sub_item_table, ss_book_settings)
         self.menu_items.screensaver = {
-            text = _("Screensaver"),
+            text = _("Sleep screen"),
             sub_item_table = screensaver_sub_item_table,
         }
     end
@@ -454,16 +459,24 @@ function ReaderMenu:onShowMenu(tab_index)
 end
 
 function ReaderMenu:onCloseReaderMenu()
-    if self.menu_container then
-        self.last_tab_index = self.menu_container[1].last_index
-        self:onSaveSettings()
-        UIManager:close(self.menu_container)
-    end
+    if not self.menu_container then return true end
+    self.last_tab_index = self.menu_container[1].last_index
+    self:onSaveSettings()
+    UIManager:close(self.menu_container)
+    self.menu_container = nil
     return true
 end
 
 function ReaderMenu:onSetDimensions(dimen)
-    self:onCloseReaderMenu()
+    -- This widget doesn't support in-place layout updates, so, close & reopen
+    if self.menu_container then
+        self:onCloseReaderMenu()
+        self:onShowMenu()
+    end
+
+    -- update gesture zones according to new screen dimen
+    -- (On CRe, this will get called a second time by ReaderReady once the document is reloaded).
+    self:initGesListener()
 end
 
 function ReaderMenu:onCloseDocument()

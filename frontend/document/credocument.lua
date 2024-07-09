@@ -29,10 +29,17 @@ local CreDocument = Document:extend{
     _smooth_scaling = false,
     _nightmode_images = true,
 
-    line_space_percent = 100,
     default_font = "Noto Serif",
     monospace_font = "Droid Sans Mono",
     header_font = "Noto Sans",
+
+    prop_to_cre_prop = { -- see cre lvtinydom.h
+        title        = "doc.title",
+        authors      = "doc.authors",
+        series       = "doc.series.name",
+        series_index = "doc.series.number",
+        identifiers  = "doc.identifiers",
+    },
 
     -- Reasons for the fallback font ordering:
     -- - Noto Sans CJK SC before FreeSans/Serif, as it has nice and larger
@@ -109,6 +116,15 @@ end
 function CreDocument:engineInit()
     if not engine_initialized then
         cre = require("libs/libkoreader-cre")
+
+        -- When forking to execute any stuff in a sub-process,
+        -- as that stuff may not care about properly closing
+        -- the document, skip cre.cpp finalizer to avoid any
+        -- assertion failure.
+        require("ffi/util").addRunInSubProcessAfterForkFunc("cre_skip_teardown", function()
+            cre.setSkipTearDown(true)
+        end)
+
         -- initialize cache
         self:cacheInit()
 
@@ -150,7 +166,7 @@ function CreDocument:init()
     self.flows = {}
     self.page_in_flow = {}
 
-    local file_type = string.lower(string.match(self.file, ".+%.([^.]+)"))
+    local file_type = string.lower(string.match(self.file, ".+%.([^.]+)") or "")
     if file_type == "zip" then
         -- NuPogodi, 20.05.12: read the content of zip-file
         -- and return extention of the 1st file
@@ -167,6 +183,7 @@ function CreDocument:init()
     self.default_css = "./data/epub.css"
     if file_type == "fb2" or file_type == "fb3" then
         self.default_css = "./data/fb2.css"
+        self.is_fb2 = true -- FB2 won't look good with any html-oriented stylesheet
     end
 
     -- This mode must be the same as the default one set as ReaderView.view_mode
@@ -211,6 +228,18 @@ end
 
 function CreDocument:getDocumentFormat()
     return self._document:getDocumentFormat()
+end
+
+function CreDocument:getDocumentProps()
+    return self._document:getDocumentProps()
+end
+
+function CreDocument:setAltDocumentProp(prop, value)
+    logger.dbg("CreDocument: set alt document prop", prop, value)
+    if type(value) == "number" then -- series index
+        value = tostring(value)
+    end
+    self._document:setAltDocumentProp(self.prop_to_cre_prop[prop], value)
 end
 
 function CreDocument:setupDefaultView()
@@ -672,8 +701,13 @@ function CreDocument:getWordFromPosition(pos)
     ]]--
 end
 
-function CreDocument:getTextFromPositions(pos0, pos1)
-    local text_range = self._document:getTextFromPositions(pos0.x, pos0.y, pos1.x, pos1.y)
+function CreDocument:getTextFromPositions(pos0, pos1, do_not_draw_selection)
+    local drawSelection, drawSegmentedSelection
+    if do_not_draw_selection then
+        drawSelection, drawSegmentedSelection = false, false
+    end
+    local text_range = self._document:getTextFromPositions(pos0.x, pos0.y, pos1.x, pos1.y,
+        drawSelection, drawSegmentedSelection)
     logger.dbg("CreDocument: get text range", text_range)
     if text_range then
         -- local line_boxes = self:getScreenBoxesFromPositions(text_range.pos0, text_range.pos1)
@@ -941,8 +975,8 @@ function CreDocument:getHTMLFromXPointers(xp0, xp1, flags, from_root_node)
     end
 end
 
-function CreDocument:getStylesheetsMatchingRulesets(node_dataindex)
-    return self._document:getStylesheetsMatchingRulesets(node_dataindex)
+function CreDocument:getStylesheetsMatchingRulesets(node_dataindex, with_main_stylesheet)
+    return self._document:getStylesheetsMatchingRulesets(node_dataindex, with_main_stylesheet)
 end
 
 function CreDocument:getNormalizedXPointer(xp)
@@ -1344,6 +1378,11 @@ function CreDocument:setBatteryState(state)
     self._document:setBatteryState(state)
 end
 
+function CreDocument:setPageInfoOverride(pageinfo)
+    logger.dbg("CreDocument: set page info", pageinfo)
+    self._document:setPageInfoOverride(pageinfo)
+end
+
 function CreDocument:isXPointerInCurrentPage(xp)
     logger.dbg("CreDocument: check xpointer in current page", xp)
     return self._document:isXPointerInCurrentPage(xp)
@@ -1375,10 +1414,14 @@ function CreDocument:getAndClearRegexSearchError()
     return retval
 end
 
-function CreDocument:findText(pattern, origin, reverse, caseInsensitive, page, regex, max_hits)
-    logger.dbg("CreDocument: find text", pattern, origin, reverse, caseInsensitive, regex, max_hits)
-    return self._document:findText(
-        pattern, origin, reverse, caseInsensitive and 1 or 0, regex and 1 or 0, max_hits or 200)
+function CreDocument:findText(pattern, origin, direction, case_insensitive, page, regex, max_hits)
+    logger.dbg("CreDocument: find text", pattern, origin, direction == 1, case_insensitive, regex, max_hits)
+    return self._document:findText(pattern, origin, direction == 1, case_insensitive, regex, max_hits)
+end
+
+function CreDocument:findAllText(pattern, case_insensitive, nb_context_words, max_hits, regex)
+    logger.dbg("CreDocument: find all text", pattern, case_insensitive, regex, max_hits, true, nb_context_words)
+    return self._document:findAllText(pattern, case_insensitive, regex, max_hits, true, nb_context_words)
 end
 
 function CreDocument:enableInternalHistory(toggle)
@@ -1504,7 +1547,9 @@ function CreDocument:register(registry)
     registry:addProvider("chm", "application/vnd.ms-htmlhelp", self, 90)
     registry:addProvider("doc", "application/msword", self, 90)
     registry:addProvider("docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", self, 90)
+    registry:addProvider("docm", "application/vnd.ms-word.document.macroEnabled.12", self, 90)
     registry:addProvider("epub", "application/epub+zip", self, 100)
+    registry:addProvider("epub", "application/epub", self, 100) -- Alternative mimetype for OPDS.
     registry:addProvider("epub3", "application/epub+zip", self, 100)
     registry:addProvider("fb2", "application/fb2", self, 90)
     registry:addProvider("fb2", "text/fb2+xml", self, 90) -- Alternative mimetype for OPDS.
@@ -1767,6 +1812,7 @@ function CreDocument:setupCallCache()
 
             -- Assume all set* may change rendering
             if name == "setBatteryState" then no_wrap = true -- except this one
+            elseif name == "setPageInfoOverride" then no_wrap = true -- and this one
             elseif name:sub(1,3) == "set" then add_reset = true
             elseif name:sub(1,6) == "toggle" then add_reset = true
             elseif name:sub(1,6) == "update" then add_reset = true

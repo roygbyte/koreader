@@ -2,8 +2,8 @@
 -- usage: ./luajit tools/wtest.lua
 
 print(package.path)
-package.path = "common/?.lua;rocks/share/lua/5.1/?.lua;frontend/?.lua;" .. package.path
-package.cpath = "common/?.so;common/?.dll;/usr/lib/lua/?.so;rocks/lib/lua/5.1/?.so;" .. package.cpath
+package.path = "common/?.lua;frontend/?.lua;" .. package.path
+package.cpath = "common/?.so;common/?.dll;/usr/lib/lua/?.so;" .. package.cpath
 
 -- Load default settings
 G_defaults = require("luadefaults"):open()
@@ -139,7 +139,8 @@ Background = InputContainer:new{
         bordersize = 0,
         dimen = Screen:getSize(),
         Widget:new{
-            dimen = {
+            dimen = Geom:new{
+                x = 0, y = 0,
                 w = Screen:getWidth(),
                 h = Screen:getHeight(),
             }
@@ -390,7 +391,7 @@ function testBookStatus()
 
     local status_page = require("ui/widget/bookstatuswidget"):new {
         thumbnail = doc:getCoverPageImage(),
-        props = doc:getProps(),
+        props = reader.doc_props,
         document = doc,
         ui = reader,
     }

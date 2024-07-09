@@ -6,7 +6,6 @@ local BD = require("ui/bidi")
 local Blitbuffer = require("ffi/blitbuffer")
 local ButtonTable = require("ui/widget/buttontable")
 local CenterContainer = require("ui/widget/container/centercontainer")
-local DataStorage = require("datastorage")
 local Device = require("device")
 local Event = require("ui/event")
 local Geom = require("ui/geometry")
@@ -15,6 +14,7 @@ local FrameContainer = require("ui/widget/container/framecontainer")
 local ImageWidget = require("ui/widget/imagewidget")
 local InputContainer = require("ui/widget/container/inputcontainer")
 local ProgressWidget = require("ui/widget/progresswidget")
+local Screenshoter = require("ui/widget/screenshoter")
 local Size = require("ui/size")
 local TitleBar = require("ui/widget/titlebar")
 local VerticalGroup = require("ui/widget/verticalgroup")
@@ -40,6 +40,7 @@ local ImageViewer = InputContainer:extend{
     -- the image_disposable provided here.
     -- Each BlitBuffer in the table (or returned by functions) will be free'd
     -- if the table itself has an image_disposable field set to true.
+    images_list_nb = nil, -- if set, overrides #self.image
 
     -- With images list, when switching image, whether to keep previous
     -- image pan & zoom
@@ -142,7 +143,7 @@ function ImageViewer:init()
             self.image = self.image()
         end
         self._images_list_cur = 1
-        self._images_list_nb = #self._images_list
+        self._images_list_nb = self.images_list_nb or #self._images_list
         self._images_orig_scale_factor = self.scale_factor
         -- also swap disposable status
         self._images_list_disposable = self.image_disposable
@@ -153,6 +154,10 @@ function ImageViewer:init()
     if type(self.image) == "function" then
         self._scaled_image_func = self.image
         self.image = self._scaled_image_func(1) -- native image size, that we need to know
+    end
+
+    if self.image and G_reader_settings:isTrue("imageviewer_rotate_auto_for_best_fit") then
+        self.rotated = (Screen:getWidth() > Screen:getHeight()) ~= (self.image:getWidth() > self.image:getHeight())
     end
 
     -- Widget layout
@@ -207,8 +212,6 @@ function ImageViewer:init()
     }
     self.button_table = ButtonTable:new{
         width = self.width - 2*self.button_padding,
-        button_font_face = "cfont",
-        button_font_size = 20,
         buttons = buttons,
         zero_sep = true,
         show_parent = self,
@@ -271,12 +274,9 @@ function ImageViewer:init()
         end
     end
 
-    if self._images_list then
+    if self._images_list and self._images_list_nb > 1 then
         -- progress bar
-        local percent = 1
-        if self._images_list and self._images_list_nb > 1 then
-            percent = (self._images_list_cur - 1) / (self._images_list_nb - 1)
-        end
+        local percent = (self._images_list_cur - 1) / (self._images_list_nb - 1)
         self.progress_bar = ProgressWidget:new{
             width = self.width - 2*self.button_padding,
             height = Screen:scaleBySize(5),
@@ -346,11 +346,8 @@ function ImageViewer:update()
     -- Image container (we'll insert it once all others are added and we know the height remaining)
     local image_container_idx = #self.frame_elements + 1
     -- Progress bar
-    if self._images_list then
-        local percent = 1
-        if self._images_list_nb > 1 then
-            percent = (self._images_list_cur - 1) / (self._images_list_nb - 1)
-        end
+    if self._images_list and self._images_list_nb > 1 then
+        local percent = (self._images_list_cur - 1) / (self._images_list_nb - 1)
         self.progress_bar:setPercentage(percent)
         table.insert(self.frame_elements, self.progress_container)
     end
@@ -372,13 +369,14 @@ function ImageViewer:update()
     self.main_frame.radius = not self.fullscreen and 8 or nil
 
     -- NOTE: We use UI instead of partial, because we do NOT want to end up using a REAGL waveform...
+    local wfm_mode = Device:hasKaleidoWfm() and "color" or "ui"
     -- NOTE: Disabling dithering here makes for a perfect test-case of how well it works:
     --       page turns will show color quantization artefacts (i.e., banding) like crazy,
     --       while a long touch will trigger a dithered, flashing full-refresh that'll make everything shiny :).
     self.dithered = true
     UIManager:setDirty(self, function()
         local update_region = self.main_frame.dimen:combine(orig_dimen)
-        return "ui", update_region, true
+        return wfm_mode, update_region, true
     end)
 end
 
@@ -405,16 +403,24 @@ function ImageViewer:_new_image_wg()
 
     local rotation_angle = 0
     if self.rotated then
-        -- in portrait mode, rotate according to this global setting so we are
-        -- like in landscape mode
-        -- NOTE: This is the sole user of this legacy global left!
-        local rotate_clockwise = G_defaults:readSetting("DLANDSCAPE_CLOCKWISE_ROTATION")
-        if Screen:getWidth() > Screen:getHeight() then
-            -- in landscape mode, counter-rotate landscape rotation so we are
-            -- back like in portrait mode
-            rotate_clockwise = not rotate_clockwise
+        local rotate_clockwise
+        if Screen:getWidth() <= Screen:getHeight() then
+            -- In portraite mode, the default is to rotate the image counterclockwise, so devices
+            -- with hardware buttons on their thick right side get to be rotated clockwise
+            -- with that thicker side at the bottom in the hand of the user.
+            rotate_clockwise = false
+            if G_reader_settings:isTrue("imageviewer_rotation_portrait_invert") then
+                rotate_clockwise = true
+            end
+        else
+            -- In landscape mode, the default is to rotate the image clockwise, so such devices
+            -- (see above) get back to their original orientation with their thick side on the right.
+            rotate_clockwise = true
+            if G_reader_settings:isTrue("imageviewer_rotation_landscape_invert") then
+                rotate_clockwise = false
+            end
         end
-        rotation_angle = rotate_clockwise and 90 or 270
+        rotation_angle = rotate_clockwise and 270 or 90 -- (unintuitive, but this does it)
     end
 
     if self._scaled_image_func then
@@ -431,6 +437,7 @@ function ImageViewer:_new_image_wg()
         file = self.file,
         image = self.image,
         image_disposable = false, -- we may re-use self.image
+        file_do_cache = false,
         alpha = true, -- we might be showing images with an alpha channel (e.g., from Wikipedia)
         width = max_image_w,
         height = max_image_h,
@@ -805,8 +812,8 @@ function ImageViewer:onSaveImageView()
         self:update()
         UIManager:forceRePaint()
     end
-    local screenshots_dir = G_reader_settings:readSetting("screenshot_dir") or DataStorage:getDataDir() .. "/screenshots/"
-    local screenshot_name = os.date(screenshots_dir .. "ImageViewer" .. "_%Y-%m-%d_%H%M%S.png")
+    local screenshot_dir = Screenshoter:getScreenshotDir()
+    local screenshot_name = os.date(screenshot_dir .. "/ImageViewer_%Y-%m-%d_%H%M%S.png")
     UIManager:sendEvent(Event:new("Screenshot", screenshot_name, restore_settings_func))
     return true
 end
@@ -846,7 +853,7 @@ function ImageViewer:onCloseWidget()
             self.captioned_title_bar:free()
         end
     end
-    if self._images_list then
+    if self._images_list and self._images_list_nb > 1 then
         self.progress_container:free()
     end
     self.button_container:free()
@@ -855,6 +862,29 @@ function ImageViewer:onCloseWidget()
     UIManager:setDirty(nil, function()
         return "flashui", self.main_frame.dimen
     end)
+end
+
+-- Register DocumentRegistry auxiliary provider.
+function ImageViewer:register(registry)
+    registry:addAuxProvider({
+        provider_name = _("Image viewer"),
+        provider = "imageviewer",
+        order = 10, -- order in OpenWith dialog
+        enabled_func = function(file)
+            return registry:isImageFile(file)
+        end,
+        callback = ImageViewer.openFile,
+        disable_file = true,
+        disable_type = false,
+    })
+end
+
+function ImageViewer.openFile(file)
+    UIManager:show(ImageViewer:new{
+        file = file,
+        fullscreen = true,
+        with_title_bar = false,
+    })
 end
 
 return ImageViewer

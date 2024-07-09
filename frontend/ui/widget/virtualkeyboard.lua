@@ -133,6 +133,13 @@ function VirtualKey:init()
             self.ignore_key_release = true -- don't have delChar called on release
             self.keyboard:delToStartOfLine()
         end
+        self.swipe_callback = function(ges)
+            if ges.direction == "west" then
+                self.keyboard:delWord(true) -- left to cursor
+            elseif ges.direction == "north" then
+                self.keyboard:delWord()
+            end
+        end
         --self.skiphold = true
     elseif self.label == "←" then
         self.callback = function() self.keyboard:leftChar() end
@@ -310,6 +317,19 @@ function VirtualKey:init()
     self.flash_keyboard = G_reader_settings:nilOrTrue("flash_keyboard")
 end
 
+function VirtualKey:paintTo(...)
+    InputContainer.paintTo(self, ...)
+
+    -- Fudge self.dimen to include the padding, to make sure said padding is covered by our ges_events range...
+    -- Like Geom, floor coordinates & ceil dims, to fill the gaps without overlaps.
+    local coords_padding = math.floor(self.keyboard.key_padding / 2)
+    local dims_padding = self.keyboard.key_padding -- i.e., coords_padding + math.ceil(self.keyboard.key_padding / 2)
+    self.dimen.x = self.dimen.x - coords_padding
+    self.dimen.w = self[1].dimen.w + dims_padding
+    self.dimen.y = self.dimen.y - coords_padding
+    self.dimen.h = self[1].dimen.h + dims_padding
+end
+
 function VirtualKey:genKeyboardLayoutKeyChars()
     local positions = {
         "northeast",
@@ -347,7 +367,7 @@ function VirtualKey:update_keyboard(want_flash, want_a2)
     --       We flash the *full* keyboard when we release a hold.
     if want_flash then
         UIManager:setDirty(self.keyboard, function()
-            return "flashui", self.keyboard[1][1].dimen -- i.e., keyboard_frame
+            return "flashui", self.keyboard.dimen
         end)
     else
         local refresh_type = "ui"
@@ -355,6 +375,8 @@ function VirtualKey:update_keyboard(want_flash, want_a2)
             refresh_type = "a2"
         end
         -- Only repaint the key itself, not the full board...
+        -- NOTE: We use self[1] (i.e., FrameContainer),
+        --       because we fudge self.dimen to include the padding for the gesture hitbox...
         UIManager:widgetRepaint(self[1], self[1].dimen.x, self[1].dimen.y)
         logger.dbg("update key", self.key)
         UIManager:setDirty(nil, refresh_type, self[1].dimen)
@@ -422,8 +444,11 @@ function VirtualKey:onHoldSelect()
 end
 
 function VirtualKey:onSwipeKey(arg, ges)
+    if G_reader_settings:isFalse("keyboard_swipes_enabled") then
+        return self:onTapSelect()
+    end
     Device:performHapticFeedback("KEYBOARD_TAP")
-    if self.flash_keyboard and not self.skipswipe then
+    if self.flash_keyboard then
         self:invert(true)
         UIManager:forceRePaint()
         UIManager:yieldToEPDC()
@@ -491,7 +516,7 @@ VirtualKeyPopup = FocusManager:extend{
 }
 
 function VirtualKeyPopup:onTapClose(arg, ges)
-    if ges.pos:notIntersectWith(self[1][1].dimen) then
+    if ges.pos:notIntersectWith(self.dimen) then
         UIManager:close(self)
         return true
     end
@@ -506,7 +531,7 @@ end
 function VirtualKeyPopup:onCloseWidget()
     self:free()
     UIManager:setDirty(nil, function()
-        return "ui", self[1][1].dimen -- i.e., keyboard_frame
+        return "ui", self.dimen
     end)
 end
 
@@ -693,6 +718,7 @@ function VirtualKeyPopup:init()
         }
     }
     keyboard_frame.dimen = keyboard_frame:getSize()
+    self.dimen = keyboard_frame.dimen
 
     self.ges_events.TapClose = {
         GestureRange:new{
@@ -749,12 +775,14 @@ function VirtualKeyPopup:init()
     UIManager:show(self)
     -- Ensure the post-paint refresh will be able to grab updated coordinates from keyboard_frame by using a refresh function
     UIManager:setDirty(self, function()
-        return "ui", keyboard_frame.dimen
+        return "ui", self.dimen
     end)
 end
 
 local VirtualKeyboard = FocusManager:extend{
     name = "VirtualKeyboard",
+    visible = nil,
+    lock_visibility = false,
     covers_footer = true,
     modal = true,
     disable_double_tap = true,
@@ -781,6 +809,8 @@ local VirtualKeyboard = FocusManager:extend{
         ar = "ar_keyboard",
         bg_BG = "bg_keyboard",
         bn = "bn_keyboard",
+        cs = "cs_keyboard",
+        da = "da_keyboard",
         de = "de_keyboard",
         el = "el_keyboard",
         en = "en_keyboard",
@@ -791,11 +821,13 @@ local VirtualKeyboard = FocusManager:extend{
         ja = "ja_keyboard",
         ka = "ka_keyboard",
         ko_KR = "ko_KR_keyboard",
+        nb_NO = "no_keyboard",
         pl = "pl_keyboard",
         pt_BR = "pt_keyboard",
         ro = "ro_keyboard",
         ru = "ru_keyboard",
         sk = "sk_keyboard",
+        sv = "sv_keyboard",
         th = "th_keyboard",
         tr = "tr_keyboard",
         uk = "uk_keyboard",
@@ -925,17 +957,59 @@ function VirtualKeyboard:_refresh(want_flash, fullscreen)
         return
     end
     UIManager:setDirty(self, function()
-        return refresh_type, self[1][1].dimen -- i.e., keyboard_frame
+        return refresh_type, self.dimen
     end)
 end
 
 function VirtualKeyboard:onShow()
     self:_refresh(true)
+    self.visible = true
+    Device:startTextInput()
     return true
 end
 
 function VirtualKeyboard:onCloseWidget()
-    self:_refresh(false)
+    self:_refresh(true)
+    self.visible = false
+    -- NOTE: This effectively stops SDL text input when a keyboard is hidden (... but navigational stuff still works).
+    --       If you instead wanted it to be enabled as long as an input dialog is displayed, regardless of VK's state,
+    --       this could be moved to InputDialog's onShow/onCloseWidget handlers (but, it would allow input on unfocused fields).
+    -- NOTE: But something more complex, possibly based on an in-class ref count would have to be implemented in order to be able to deal
+    --       with multiple InputDialogs being shown and closed in asymmetric fashion... Ugh.
+    Device:stopTextInput()
+end
+
+function VirtualKeyboard:lockVisibility(toggle)
+    self.lock_visibility = toggle
+end
+
+function VirtualKeyboard:setVisibility(toggle)
+    if self.lock_visibility then
+        return
+    end
+
+    if toggle then
+        UIManager:show(self)
+    else
+        self:onClose()
+    end
+end
+
+function VirtualKeyboard:isVisible()
+    return self.visible
+end
+
+function VirtualKeyboard:showKeyboard(ignore_first_hold_release)
+    if not self:isVisible() then
+        self.ignore_first_hold_release = ignore_first_hold_release
+        self:setVisibility(true)
+    end
+end
+
+function VirtualKeyboard:hideKeyboard()
+    if self:isVisible() then
+        self:setVisibility(false)
+    end
 end
 
 function VirtualKeyboard:initLayer(layer)
@@ -1007,7 +1081,7 @@ function VirtualKeyboard:addKeys()
                 width = key_width,
                 height = key_height,
             }
-            if not virtual_key.key_chars then
+            if not virtual_key.key_chars and label ~= "" then
                 virtual_key.swipe_callback = nil
             end
             table.insert(horizontal_group, virtual_key)
@@ -1042,9 +1116,9 @@ function VirtualKeyboard:addKeys()
         dimen = Screen:getSize(),
         keyboard_frame,
     }
-    -- Beware, this won't be updated post-paint, so the coordinates will stay at (0, 0)
-    -- (i.e., only the size is accurate, not the position).
-    self.dimen = keyboard_frame:getSize()
+    -- Point our top-level dimen to the relevant widget, keyboard_frame
+    keyboard_frame.dimen = keyboard_frame:getSize()
+    self.dimen = keyboard_frame.dimen
 end
 
 function VirtualKeyboard:setLayer(key)
@@ -1067,6 +1141,11 @@ end
 function VirtualKeyboard:delChar()
     logger.dbg("delete char")
     self.inputbox:delChar()
+end
+
+function VirtualKeyboard:delWord(left_to_cursor)
+    logger.dbg("delete word")
+    self.inputbox:delWord(left_to_cursor)
 end
 
 function VirtualKeyboard:delToStartOfLine()

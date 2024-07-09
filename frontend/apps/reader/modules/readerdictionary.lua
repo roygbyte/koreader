@@ -102,6 +102,7 @@ function ReaderDictionary:init()
     self.disable_lookup_history = G_reader_settings:isTrue("disable_lookup_history")
     self.dicts_order = G_reader_settings:readSetting("dicts_order", {})
     self.dicts_disabled = G_reader_settings:readSetting("dicts_disabled", {})
+    self.disable_fuzzy_search_fm = G_reader_settings:isTrue("disable_fuzzy_search")
 
     if self.ui then
         self.ui.menu:registerToMainMenu(self)
@@ -206,6 +207,9 @@ function ReaderDictionary:updateSdcvDictNamesOptions()
 end
 
 function ReaderDictionary:addToMainMenu(menu_items)
+    menu_items.search_settings = { -- submenu with Dict, Wiki, Translation settings
+        text = _("Settings"),
+    }
     menu_items.dictionary_lookup = {
         text = _("Dictionary lookup"),
         callback = function()
@@ -270,15 +274,29 @@ function ReaderDictionary:addToMainMenu(menu_items)
                 sub_item_table_func = function() return self:_genDownloadDictionariesMenu() end,
             },
             {
-                text = _("Enable fuzzy search"),
+                text_func = function()
+                    local text = _("Enable fuzzy search")
+                    if G_reader_settings:nilOrFalse("disable_fuzzy_search") then
+                        text = text .. "   ★"
+                    end
+                    return text
+                end,
                 checked_func = function()
-                    return not self.disable_fuzzy_search == true
+                    if self.ui.doc_settings then
+                        return not self.disable_fuzzy_search
+                    end
+                    return not self.disable_fuzzy_search_fm
                 end,
                 callback = function()
-                    self.disable_fuzzy_search = not self.disable_fuzzy_search
+                    if self.ui.doc_settings then
+                        self.disable_fuzzy_search = not self.disable_fuzzy_search
+                        self.ui.doc_settings:saveSetting("disable_fuzzy_search", self.disable_fuzzy_search)
+                    else
+                        self.disable_fuzzy_search_fm = not self.disable_fuzzy_search_fm
+                    end
                 end,
-                hold_callback = function()
-                    self:toggleFuzzyDefault()
+                hold_callback = function(touchmenu_instance)
+                    self:toggleFuzzyDefault(touchmenu_instance)
                 end,
                 separator = true,
             },
@@ -406,17 +424,23 @@ function ReaderDictionary:addToMainMenu(menu_items)
     end
 end
 
-function ReaderDictionary:onLookupWord(word, is_sane, boxes, highlight, link, tweak_buttons_func)
+function ReaderDictionary:onLookupWord(word, is_sane, boxes, highlight, link)
     logger.dbg("dict lookup word:", word, boxes)
     -- escape quotes and other funny characters in word
     word = self:cleanSelection(word, is_sane)
     logger.dbg("dict stripped word:", word)
 
     self.highlight = highlight
+    local disable_fuzzy_search
+    if self.ui.doc_settings then
+        disable_fuzzy_search = self.disable_fuzzy_search
+    else
+        disable_fuzzy_search = self.disable_fuzzy_search_fm
+    end
 
     -- Wrapped through Trapper, as we may be using Trapper:dismissablePopen() in it
     Trapper:wrap(function()
-        self:stardictLookup(word, self.enabled_dict_names, not self.disable_fuzzy_search, boxes, link, tweak_buttons_func)
+        self:stardictLookup(word, self.enabled_dict_names, not disable_fuzzy_search, boxes, link)
     end)
     return true
 end
@@ -653,14 +677,14 @@ function ReaderDictionary:cleanSelection(text, is_sane)
     -- (example: pdf selection "qu’autrefois," will be cleaned to "autrefois")
     --
     -- Replace no-break space with regular space
-    text = text:gsub("\xC2\xA0", ' ') -- U+00A0 no-break space
+    text = text:gsub("\u{00A0}", ' ')
     -- Trim any space at start or end
     text = text:gsub("^%s+", "")
     text = text:gsub("%s+$", "")
     if not is_sane then
         -- Replace extended quote (included in the general puncturation range)
         -- with plain ascii quote (for french words like "aujourd’hui")
-        text = text:gsub("\xE2\x80\x99", "'") -- U+2019 (right single quotation mark)
+        text = text:gsub("\u{2019}", "'") -- Right single quotation mark
         -- Strip punctuation characters around selection
         text = util.stripPunctuation(text)
         -- Strip some common english grammatical construct
@@ -908,18 +932,12 @@ function ReaderDictionary:startSdcv(word, dict_names, fuzzy_search)
     return results
 end
 
-function ReaderDictionary:stardictLookup(word, dict_names, fuzzy_search, boxes, link, tweak_buttons_func)
+function ReaderDictionary:stardictLookup(word, dict_names, fuzzy_search, boxes, link)
     if word == "" then
         return
     end
 
-    local book_title = self.ui.doc_settings and self.ui.doc_settings:readSetting("doc_props").title or _("Dictionary lookup")
-    if book_title == "" then -- no or empty metadata title
-        if self.ui.document and self.ui.document.file then
-            local directory, filename = util.splitFilePathName(self.ui.document.file) -- luacheck: no unused
-            book_title = util.splitFileNameSuffix(filename)
-        end
-    end
+    local book_title = self.ui.doc_props and self.ui.doc_props.display_title or _("Dictionary lookup")
 
     -- Event for plugin to catch lookup with book title
     self.ui:handleEvent(Event:new("WordLookedUp", word, book_title))
@@ -974,16 +992,15 @@ function ReaderDictionary:stardictLookup(word, dict_names, fuzzy_search, boxes, 
         return
     end
 
-    self:showDict(word, tidyMarkup(results), boxes, link, tweak_buttons_func)
+    self:showDict(word, tidyMarkup(results), boxes, link)
 end
 
-function ReaderDictionary:showDict(word, results, boxes, link, tweak_buttons_func)
+function ReaderDictionary:showDict(word, results, boxes, link)
     if results and results[1] then
         logger.dbg("showing quick lookup window", #DictQuickLookup.window_list+1, ":", word, results)
         self.dict_window = DictQuickLookup:new{
             ui = self.ui,
             highlight = self.highlight,
-            tweak_buttons_func = tweak_buttons_func,
             dialog = self.dialog,
             -- original lookup word
             word = word,
@@ -1096,15 +1113,24 @@ function ReaderDictionary:downloadDictionary(dict, download_location, continue)
         --logger.dbg(headers)
         file_size = headers and headers["content-length"]
 
-        UIManager:show(ConfirmBox:new{
-            text =  T(_("Dictionary filesize is %1 (%2 bytes). Continue with download?"), util.getFriendlySize(file_size), util.getFormattedSize(file_size)),
-            ok_text =  _("Download"),
-            ok_callback = function()
-                -- call ourselves with continue = true
-                self:downloadDictionary(dict, download_location, true)
-            end,
-        })
-        return
+        if file_size then
+            UIManager:show(ConfirmBox:new{
+                text =  T(_("Dictionary filesize is %1 (%2 bytes). Continue with download?"), util.getFriendlySize(file_size), util.getFormattedSize(file_size)),
+                ok_text =  _("Download"),
+                ok_callback = function()
+                    -- call ourselves with continue = true
+                    self:downloadDictionary(dict, download_location, true)
+                end,
+            })
+            return
+        else
+            logger.dbg("ReaderDictionary: Request failed; response headers:", headers)
+            UIManager:show(InfoMessage:new{
+                text = _("Failed to fetch dictionary. Are you online?"),
+                --timeout = 3,
+            })
+            return false
+        end
     else
         UIManager:nextTick(function()
             UIManager:show(InfoMessage:new{
@@ -1196,7 +1222,6 @@ end
 function ReaderDictionary:onSaveSettings()
     if self.ui.doc_settings then
         self.ui.doc_settings:saveSetting("preferred_dictionaries", self.preferred_dictionaries)
-        self.ui.doc_settings:saveSetting("disable_fuzzy_search", self.disable_fuzzy_search)
     end
 end
 
@@ -1225,7 +1250,7 @@ function ReaderDictionary:onTogglePreferredDict(dict)
     return true
 end
 
-function ReaderDictionary:toggleFuzzyDefault()
+function ReaderDictionary:toggleFuzzyDefault(touchmenu_instance)
     local disable_fuzzy_search = G_reader_settings:isTrue("disable_fuzzy_search")
     UIManager:show(MultiConfirmBox:new{
         text = T(
@@ -1248,12 +1273,14 @@ The current default (★) is enabled.]])
         end,
         choice1_callback = function()
             G_reader_settings:makeTrue("disable_fuzzy_search")
+            touchmenu_instance:updateItems()
         end,
         choice2_text_func = function()
             return disable_fuzzy_search and _("Enable") or _("Enable (★)")
         end,
         choice2_callback = function()
             G_reader_settings:makeFalse("disable_fuzzy_search")
+            touchmenu_instance:updateItems()
         end,
     })
 end

@@ -1,6 +1,8 @@
 local DateTimeWidget = require("ui/widget/datetimewidget")
 local Device = require("device")
+local DocSettings = require("docsettings")
 local Event = require("ui/event")
+local FileManagerBookInfo = require("apps/filemanager/filemanagerbookinfo")
 local InfoMessage = require("ui/widget/infomessage")
 local Language = require("ui/language")
 local NetworkMgr = require("ui/network/manager")
@@ -74,15 +76,15 @@ common_settings.time = {
     text = _("Time and date"),
     sub_item_table = {
         {
-        text = _("12-hour clock"),
-        keep_menu_open = true,
-        checked_func = function()
-            return G_reader_settings:isTrue("twelve_hour_clock")
-        end,
-        callback = function()
-            G_reader_settings:flipNilOrFalse("twelve_hour_clock")
-            UIManager:broadcastEvent(Event:new("TimeFormatChanged"))
-        end,
+            text = _("12-hour clock"),
+            keep_menu_open = true,
+            checked_func = function()
+                return G_reader_settings:isTrue("twelve_hour_clock")
+            end,
+            callback = function()
+                G_reader_settings:flipNilOrFalse("twelve_hour_clock")
+                UIManager:broadcastEvent(Event:new("TimeFormatChanged"))
+            end,
         },
         {
             text_func = function ()
@@ -269,8 +271,9 @@ common_settings.screen_eink_opt = require("ui/elements/screen_eink_opt_menu_tabl
 common_settings.screen_notification = require("ui/elements/screen_notification_menu_table")
 
 if Device:isTouchDevice() then
-    common_settings.menu_activate = require("ui/elements/menu_activate")
-    common_settings.screen_disable_double_tab = require("ui/elements/screen_disable_double_tap_table")
+    common_settings.taps_and_gestures = {
+        text = _("Taps and gestures"),
+    }
     common_settings.ignore_hold_corners = {
         text = _("Ignore long-press on corners"),
         checked_func = function()
@@ -280,6 +283,8 @@ if Device:isTouchDevice() then
             UIManager:broadcastEvent(Event:new("IgnoreHoldCorners"))
         end,
     }
+    common_settings.screen_disable_double_tab = require("ui/elements/screen_disable_double_tap_table")
+    common_settings.menu_activate = require("ui/elements/menu_activate")
 end
 
 -- NOTE: Allow disabling color if it's mistakenly enabled on a Grayscale screen (after a settings import?)
@@ -366,16 +371,6 @@ Please don't change any settings unless you know what you're doing.]])
     end
 end
 
-if Device:isTouchDevice() then
-    common_settings.keyboard_layout = {
-        text = _("Keyboard"),
-        sub_item_table = require("ui/elements/menu_keyboard_layout"),
-    }
-    common_settings.taps_and_gestures = {
-        text = _("Taps and gestures"),
-    }
-end
-
 common_settings.navigation = {
     text = _("Navigation"),
 }
@@ -396,7 +391,6 @@ local function genGenericMenuEntry(title, setting, value, default, radiomark)
         end,
     }
 end
-
 common_settings.back_to_exit = {
     text_func = function()
         local back_to_exit = G_reader_settings:readSetting("back_to_exit", "prompt") -- set "back_to_exit" to "prompt"
@@ -483,13 +477,30 @@ if Device:hasKeyboard() then
 end
 
 common_settings.opening_page_location_stack = {
-        text = _("Add opening page to location history"),
-        checked_func = function()
-            return G_reader_settings:isTrue("opening_page_location_stack")
-        end,
-        callback = function()
-            G_reader_settings:flipNilOrFalse("opening_page_location_stack")
-        end,
+    text = _("Add opening page to location history"),
+    checked_func = function()
+        return G_reader_settings:isTrue("opening_page_location_stack")
+    end,
+    callback = function()
+        G_reader_settings:flipNilOrFalse("opening_page_location_stack")
+    end,
+}
+
+local skim_dialog_position_string = {
+    top    = _("Top"),
+    center = _("Center"),
+    bottom = _("Bottom"),
+}
+common_settings.skim_dialog_position = {
+    text_func = function()
+        local position = G_reader_settings:readSetting("skim_dialog_position") or "center"
+        return T(_"Skim dialog position: %1", skim_dialog_position_string[position]:lower())
+    end,
+    sub_item_table = {
+        genGenericMenuEntry(skim_dialog_position_string["top"],    "skim_dialog_position", "top"),
+        genGenericMenuEntry(skim_dialog_position_string["center"], "skim_dialog_position", nil), -- default
+        genGenericMenuEntry(skim_dialog_position_string["bottom"], "skim_dialog_position", "bottom"),
+    },
 }
 
 -- Auto-save settings: default value, info text and warning, and menu items
@@ -539,16 +550,23 @@ common_settings.document = {
 }
 
 local metadata_folder_str = {
-    ["doc"] = _("book folder"),
-    ["dir"] = "koreader/docsettings/",
+    ["doc"]  = _("book folder"),
+    ["dir"]  = DocSettings.getSidecarStorage("dir"),
+    ["hash"] = DocSettings.getSidecarStorage("hash"),
 }
 
-local metadata_folder_help_text = _([[
-Book view settings, reading progress, highlights, bookmarks and notes (collectively known as metadata) are stored in a separate folder named <book-filename>.sdr (".sdr" meaning "sidecar").
+local metadata_folder_help_table = {
+      _("Book view settings, reading progress, highlights, bookmarks and notes (collectively known as metadata) are stored in a separate folder named <book-filename>.sdr (\".sdr\" meaning \"sidecar\")."),
+        "",
+      _("You can decide between three locations/methods where these will be saved:"),
+      _(" - alongside the book file itself (the long time default): sdr folders will be visible when you browse your library directories with another file browser or from your computer, which may clutter your vision of your library. But this allows you to move them along when you reorganize your library, and also survives any renaming of parent directories. Also, if you perform directory synchronization or backups, your settings will be part of them."),
+    T(_(" - all in %1: sdr folders will only be visible and used by KOReader, and won't clutter your vision of your library directories with another file browser or from your computer. But any reorganisation of your library (directories or filename moves and renamings) may result in KOReader not finding your previous settings for these books. These settings won't be part of any synchronization or backups of your library."), metadata_folder_str.dir),
+    T(_(" - all inside %1 as hashes: sdr folders are identified not by filepath/filename but by partial MD5 hash, allowing you to rename, move, and copy documents outside of KOReader without sdr folder clutter while keeping them linked to their metadata. However, any file modifications such as writing highlights into PDFs or downloading from calibre may change the hash, and thus lose their linked metadata. Calculating file hashes may also slow down file browser navigation. This option may suit users with multiple copies of documents across different devices and directories."), metadata_folder_str.hash),
+}
+local metadata_folder_help_text = table.concat(metadata_folder_help_table, "\n")
 
-You can decide between two locations where these will be saved:
-- alongside the book file itself (the long time default): these sdr folders will be visible when you browse your library directories with another file browser or from your computer, which may clutter your vision of your library. But this allows you to move them along when you reorganize your library, and also survives any renaming of parent directories. Also, if you perform directory synchronization or backups, your settings will be part of them.
-- all inside koreader/docsettings/: these sdr folders will only be visible and used by KOReader, and won't clutter your vision of your library directories with another file browser or from your computer. But any reorganisation of your library (directories or filename moves and renamings) may result in KOReader not finding your previous settings for these books. These settings won't be part of any synchronization or backups of your library.]])
+local hash_filemod_warn = T(_("%1 requires calculating partial file hashes of documents which may slow down file browser navigation. Any file modifications (such as embedding annotations into PDF files or downloading from calibre) may change the partial hash, thereby losing track of any highlights, bookmarks, and progress data. Embedding PDF annotations is currently set to \"%s\" and can be disabled at (⚙ → Document → Save Document (write highlights into PDF))."), metadata_folder_str.hash)
+local leaving_hash_sdr_warn = _("Warning: You currently have documents with hash-based metadata. Until this metadata is moved by opening those documents, or deleted, file browser navigation may remain slower.")
 
 local function genMetadataFolderMenuItem(value)
     return {
@@ -557,8 +575,23 @@ local function genMetadataFolderMenuItem(value)
             return G_reader_settings:readSetting("document_metadata_folder") == value
         end,
         callback = function()
-            G_reader_settings:saveSetting("document_metadata_folder", value)
+            local old_value = G_reader_settings:readSetting("document_metadata_folder")
+            if value ~= old_value then
+                G_reader_settings:saveSetting("document_metadata_folder", value)
+                if value == "hash" then
+                    DocSettings.setIsHashLocationEnabled(true)
+                    local save_document_setting = G_reader_settings:readSetting("save_document")
+                    UIManager:show(InfoMessage:new{ text = string.format(hash_filemod_warn, save_document_setting), icon = "notice-warning" })
+                else
+                    DocSettings.setIsHashLocationEnabled(nil) -- reset
+                    if DocSettings.isHashLocationEnabled() then
+                        UIManager:show(InfoMessage:new{ text = leaving_hash_sdr_warn, icon = "notice-warning" })
+                    end
+                end
+            end
         end,
+        radio = true,
+        separator = value == "hash",
     }
 end
 
@@ -579,6 +612,27 @@ common_settings.document_metadata_location = {
         },
         genMetadataFolderMenuItem("doc"),
         genMetadataFolderMenuItem("dir"),
+        genMetadataFolderMenuItem("hash"),
+        {
+            text_func = function()
+                local hash_text = _("Show documents with hash-based metadata")
+                local no_hash_text = _("No documents with hash-based metadata")
+                if DocSettings.isHashLocationEnabled() then
+                    if G_reader_settings:readSetting("document_metadata_folder") ~= "hash" then
+                        return  "⚠ " .. hash_text
+                    end
+                    return  hash_text
+                end
+                return no_hash_text
+            end,
+            keep_menu_open = true,
+            enabled_func = function()
+                return DocSettings.isHashLocationEnabled()
+            end,
+            callback = function()
+                FileManagerBookInfo.showBooksWithHashBasedMetadata()
+            end,
+        },
     },
 }
 
@@ -615,7 +669,18 @@ common_settings.document_save = {
     text = _("Save document (write highlights into PDF)"),
     sub_item_table = {
         genGenericMenuEntry(_("Prompt"), "save_document", "prompt", "prompt"), -- set "save_document" to "prompt"
-        genGenericMenuEntry(_("Always"), "save_document", "always"),
+        {
+            text = _("Always"),
+            checked_func = function()
+                return G_reader_settings:readSetting("save_document") == "always"
+            end,
+            callback = function()
+                if G_reader_settings:readSetting("document_metadata_folder") == "hash" then
+                    UIManager:show(InfoMessage:new{ text = _("Warning: Book metadata location is set to hash-based storage. Writing highlights into a PDF modifies the file which may change the partial hash, resulting in its metadata (e.g., highlights and progress) being unlinked and lost."), icon = "notice-warning"  })
+                end
+                G_reader_settings:saveSetting("save_document", "always")
+            end,
+        },
         genGenericMenuEntry(_("Disable"), "save_document", "disable"),
     },
 }
@@ -659,16 +724,16 @@ common_settings.document_end_action = {
 
 common_settings.language = Language:getLangMenuTable()
 
-common_settings.font_ui_fallbacks = require("ui/elements/font_ui_fallbacks")
-
-common_settings.screenshot = {
-    text = _("Screenshot folder"),
-    callback = function()
-        local Screenshoter = require("ui/widget/screenshoter")
-        Screenshoter:chooseFolder()
-    end,
-    keep_menu_open = true,
+common_settings.device = {
+    text = _("Device"),
 }
+
+common_settings.keyboard_layout = {
+    text = _("Keyboard"),
+    sub_item_table = require("ui/elements/menu_keyboard_layout"),
+}
+
+common_settings.font_ui_fallbacks = require("ui/elements/font_ui_fallbacks")
 
 common_settings.units = {
     text = _("Units"),
@@ -687,10 +752,11 @@ common_settings.units = {
     },
 }
 
-common_settings.search_menu = {
-    text = _("Menu search"),
+common_settings.screenshot = {
+    text = _("Screenshot folder"),
     callback = function()
-        UIManager:sendEvent(Event:new("ShowMenuSearch"))
+        local Screenshoter = require("ui/widget/screenshoter")
+        Screenshoter:chooseFolder()
     end,
     keep_menu_open = true,
 }

@@ -149,38 +149,6 @@ end
 
 -- Setup device
 local Device = require("device")
--- DPI
-local dpi_override = G_reader_settings:readSetting("screen_dpi")
-if dpi_override ~= nil then
-    Device:setScreenDPI(dpi_override)
-end
--- Night mode
-local hw_nightmode = Device.screen:getHWNightmode()
-if G_reader_settings:isTrue("night_mode") then
-    Device.screen:toggleNightMode()
-end
--- Ensure the proper rotation on startup.
--- We default to the rotation KOReader closed with.
--- If the rotation is not locked it will be overridden by a book or the FM when opened.
-local rotation_mode = G_reader_settings:readSetting("closed_rotation_mode")
-if rotation_mode and rotation_mode ~= Device.screen:getRotationMode() then
-    Device.screen:setRotationMode(rotation_mode)
-end
--- Dithering
-if Device:hasEinkScreen() then
-    Device.screen:setupDithering()
-    if Device.screen.hw_dithering and G_reader_settings:isTrue("dev_no_hw_dither") then
-        Device.screen:toggleHWDithering(false)
-    end
-    if Device.screen.sw_dithering and G_reader_settings:isTrue("dev_no_sw_dither") then
-        Device.screen:toggleSWDithering(false)
-    end
-    -- NOTE: If device can HW dither (i.e., after setupDithering(), hw_dithering is true, but sw_dithering is false),
-    --       but HW dither is explicitly disabled, and SW dither enabled, don't leave SW dither disabled (i.e., re-enable sw_dithering)!
-    if Device:canHWDither() and G_reader_settings:isTrue("dev_no_hw_dither") and G_reader_settings:nilOrFalse("dev_no_sw_dither") then
-        Device.screen:toggleSWDithering(true)
-    end
-end
 
 -- Document renderers canvas
 local CanvasContext = require("document/canvascontext")
@@ -190,7 +158,9 @@ CanvasContext:init(Device)
 Version:updateVersionLog(Device.model)
 
 -- Handle one time migration stuff (settings, deprecation, ...) in case of an upgrade...
-require("ui/data/onetime_migration")
+do
+    dofile("frontend/ui/data/onetime_migration.lua")
+end
 
 -- UI mirroring for RTL languages, and text shaping configuration
 local Bidi = require("ui/bidi")
@@ -301,20 +271,11 @@ else
         -- Always open FM modules on top of filemanager, so closing 'em doesn't result in an exit
         -- because of an empty widget stack, and so they can interact with the FM instance as expected.
         if start_with == "history" then
-            local FileManagerHistory = require("apps/filemanager/filemanagerhistory")
-            FileManagerHistory:new{
-                ui = FileManager.instance,
-            }:onShowHist()
+            FileManager.instance.history:onShowHist()
         elseif start_with == "favorites" then
-            local FileManagerCollection = require("apps/filemanager/filemanagercollection")
-            FileManagerCollection:new{
-                ui = FileManager.instance,
-            }:onShowColl("favorites")
+            FileManager.instance.collections:onShowColl()
         elseif start_with == "folder_shortcuts" then
-            local FileManagerShortcuts = require("apps/filemanager/filemanagershortcuts")
-            FileManagerShortcuts:new{
-                ui = FileManager.instance,
-            }:onShowFolderShortcutsDialog()
+            FileManager.instance.folder_shortcuts:onShowFolderShortcutsDialog()
         end
         exit_code = UIManager:run()
     end
@@ -322,33 +283,7 @@ end
 
 -- Exit
 local function exitReader()
-    -- Exit code can be shoddy on some platforms due to broken library dtors calling _exit(0) from os.exit(N)
-    local ko_exit = os.getenv("KO_EXIT_CODE")
-    if ko_exit then
-        local fo = io.open(ko_exit, "w+")
-        if fo then
-            fo:write(tostring(exit_code))
-            fo:close()
-        end
-    end
-
-    local ReaderActivityIndicator =
-        require("apps/reader/modules/readeractivityindicator")
-
-    -- Save any device settings before closing G_reader_settings
-    Device:saveSettings()
-
-    -- Save current rotation (or the original rotation if ScreenSaver temporarily modified it) to remember it for next startup
-    G_reader_settings:saveSetting("closed_rotation_mode", Device.orig_rotation_mode or Device.screen:getRotationMode())
-    G_reader_settings:close()
-
-    -- Close lipc handles
-    ReaderActivityIndicator:coda()
-
-    -- Restore initial inversion state
-    Device.screen:setHWNightmode(hw_nightmode)
-
-    -- shutdown hardware abstraction
+    -- Shutdown hardware abstraction (it'll also flush G_reader_settings to disk)
     Device:exit()
 
     if Profiler then Profiler.stop() end

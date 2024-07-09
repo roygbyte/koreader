@@ -1,9 +1,7 @@
-local DataStorage = require("datastorage")
 local DocumentRegistry = require("document/documentregistry")
 local DocSettings = require("docsettings")
+local FileManagerBookInfo = require("apps/filemanager/filemanagerbookinfo")
 local ffiutil = require("ffi/util")
-local lfs = require("libs/libkoreader-lfs")
-local logger = require("logger")
 local md5 = require("ffi/sha2").md5
 local util = require("util")
 local _ = require("gettext")
@@ -102,6 +100,10 @@ local extensions = {
     [".doc"] = true,
 }
 
+local function isEmpty(s)
+    return s == nil or s == ""
+end
+
 -- first attempt to parse from document metadata
 -- remove file extensions added by former KOReader
 -- extract author name in "Title(Author)" format
@@ -113,12 +115,14 @@ function MyClipping:parseTitleFromPath(line)
     elseif extensions[line:sub(-5):lower()] then
         line = line:sub(1, -6)
     end
-    local _, _, title, author = line:find("(.-)%s*%((.*)%)")
+    local dummy, title, author
+    dummy, dummy, title, author = line:find("(.-)%s*%((.*)%)")
     if not author then
-        _, _, title, author = line:find("(.-)%s*-%s*(.*)")
+        dummy, dummy, title, author = line:find("(.-)%s*-%s*(.*)")
     end
-    if not title then title = line end
-    return title:match("^%s*(.-)%s*$"), author
+    title = title or line:match("^%s*(.-)%s*$")
+    return isEmpty(title) and _("Unknown Book") or title,
+           isEmpty(author) and _("Unknown Author") or author
 end
 
 local keywords = {
@@ -166,7 +170,7 @@ function MyClipping:getTime(line)
         for k, v in pairs(months) do
             if line:find(k) then
                 month = v
-                _, _, day = line:find(" (%d?%d),")
+                _, _, day = line:find(" (%d?%d)[, ]")
                 _, _, year = line:find(" (%d%d%d%d)")
                 break
             end
@@ -231,6 +235,23 @@ function MyClipping:getImage(image)
     end
 end
 
+function MyClipping:parseAnnotations(annotations, book)
+    for _, item in ipairs(annotations) do
+        if item.drawer then
+            local clipping = {
+                sort    = "highlight",
+                page    = item.pageno,
+                time    = self:getTime(item.datetime),
+                text    = self:getText(item.text),
+                note    = item.note and self:getText(item.note),
+                chapter = item.chapter,
+                drawer  = item.drawer,
+            }
+            table.insert(book, { clipping })
+        end
+    end
+end
+
 function MyClipping:parseHighlight(highlights, bookmarks, book)
     --DEBUG("book", book.file)
 
@@ -245,13 +266,14 @@ function MyClipping:parseHighlight(highlights, bookmarks, book)
     local orphan_highlights = {}
     for page, items in pairs(highlights) do
         for _, item in ipairs(items) do
-            local clipping = {}
-            clipping.page = page
-            clipping.sort = "highlight"
-            clipping.time = self:getTime(item.datetime or "")
-            clipping.text = self:getText(item.text)
-            clipping.chapter = item.chapter
-            clipping.drawer = item.drawer
+            local clipping = {
+                sort    = "highlight",
+                page    = page,
+                time    = self:getTime(item.datetime or ""),
+                text    = self:getText(item.text),
+                chapter = item.chapter,
+                drawer  = item.drawer,
+            }
             local bookmark_found = false
             for _, bookmark in pairs(bookmarks) do
                 if bookmark.datetime == item.datetime then
@@ -303,110 +325,70 @@ function MyClipping:parseHighlight(highlights, bookmarks, book)
     end
 end
 
-function MyClipping:parseHistoryFile(clippings, history_file, doc_file)
-    if lfs.attributes(history_file, "mode") ~= "file"
-    or not history_file:find(".+%.lua$") then
-        return
+function MyClipping:getTitleAuthor(filepath, props)
+    local _, _, doc_name = filepath:find(".*/(.*)")
+    local parsed_title, parsed_author = self:parseTitleFromPath(doc_name)
+    return isEmpty(props.title) and parsed_title or props.title,
+           isEmpty(props.authors) and parsed_author or props.authors
+end
+
+function MyClipping:getClippingsFromBook(clippings, doc_path)
+    local doc_settings = DocSettings:open(doc_path)
+    local highlights, bookmarks
+    local annotations = doc_settings:readSetting("annotations")
+    if annotations == nil then
+        highlights = doc_settings:readSetting("highlight")
+        if highlights == nil then return end
+        bookmarks = doc_settings:readSetting("bookmarks")
     end
-    if lfs.attributes(doc_file, "mode") ~= "file" then return end
-    local ok, stored = pcall(dofile, history_file)
-    if ok then
-        if not stored then
-            logger.warn("An empty history file ",
-                        history_file,
-                        "has been found. The book associated is ",
-                        doc_file)
-            return
-        elseif not stored.highlight then
-            return
-        end
-        local _, docname = util.splitFilePathName(doc_file)
-        local parsed_title, parsed_author = self:parseTitleFromPath(util.splitFileNameSuffix(docname), doc_file)
-        clippings[parsed_title] = {
-            file = doc_file,
-            title = stored.stats.title or parsed_title,
-            author = stored.stats.authors or parsed_author,
-        }
-        self:parseHighlight(stored.highlight, stored.bookmarks, clippings[parsed_title])
+    local props = doc_settings:readSetting("doc_props")
+    props = FileManagerBookInfo.extendProps(props, doc_path)
+    local title, author = self:getTitleAuthor(doc_path, props)
+    clippings[title] = {
+        file = doc_path,
+        title = title,
+        author = author,
+        number_of_pages = doc_settings:readSetting("doc_pages"),
+    }
+    if annotations then
+        self:parseAnnotations(annotations, clippings[title])
+    else
+        self:parseHighlight(highlights, bookmarks, clippings[title])
     end
 end
 
 function MyClipping:parseHistory()
     local clippings = {}
-    local history_dir = DataStorage:getHistoryDir()
-    if lfs.attributes(history_dir, "mode") == "directory" then
-        for f in lfs.dir(history_dir) do
-            local legacy_history_file = ffiutil.joinPath(history_dir, f)
-            if lfs.attributes(legacy_history_file, "mode") == "file" then
-                local doc_file = DocSettings:getFileFromHistory(f)
-                if doc_file then
-                    self:parseHistoryFile(clippings, legacy_history_file, doc_file)
-                end
-            end
-        end
-    end
     for _, item in ipairs(require("readhistory").hist) do
-        if not item.dim then
-            self:parseHistoryFile(clippings, DocSettings:getSidecarFile(item.file, "doc"), item.file)
-            self:parseHistoryFile(clippings, DocSettings:getSidecarFile(item.file, "dir"), item.file)
+        if not item.dim and DocSettings:hasSidecarFile(item.file) then
+            self:getClippingsFromBook(clippings, item.file)
         end
     end
     return clippings
 end
 
-function MyClipping:getProps(file)
-    local document = DocumentRegistry:openDocument(file)
-    local book_props = nil
-    if document then
-        local loaded = true
-        if document.loadDocument then -- CreDocument
-            if not document:loadDocument(false) then -- load only metadata
-                -- failed loading, calling other methods would segfault
-                loaded = false
-            end
+function MyClipping:parseFiles(files)
+    local clippings = {}
+    for file in pairs(files) do
+        if DocSettings:hasSidecarFile(file) then
+            self:getClippingsFromBook(clippings, file)
         end
-        if loaded then
-            book_props = document:getProps()
-        end
-        document:close()
     end
-
-    return book_props
-end
-
-local function isEmpty(s)
-    return s == nil or s == ""
-end
-
-function MyClipping:getDocMeta(view)
-    local props = self:getProps(view.document.file)
-    local number_of_pages = view.document.info.number_of_pages
-    local title = props.title
-    local author = props.author or props.authors
-    local path = view.document.file
-    local _, _, docname = path:find(".*/(.*)")
-    local parsed_title, parsed_author = self:parseTitleFromPath(docname)
-    if isEmpty(title) then
-        title = isEmpty(parsed_title) and "Unknown Book" or parsed_title
-    end
-    if isEmpty(author) then
-        author = isEmpty(parsed_author) and "Unknown Author" or parsed_author
-    end
-    return {
-        title = title,
-        -- Replaces characters that are invalid in filenames.
-        output_filename = util.getSafeFilename(title),
-        author = author,
-        number_of_pages = number_of_pages,
-        file = view.document.file,
-    }
+    return clippings
 end
 
 function MyClipping:parseCurrentDoc(view)
     local clippings = {}
-    local meta = self:getDocMeta(view)
-    clippings[meta.title] = meta
-    self:parseHighlight(view.highlight.saved, view.ui.bookmark.bookmarks, clippings[meta.title])
+    local title, author = self:getTitleAuthor(view.document.file, view.ui.doc_props)
+    clippings[title] = {
+        file = view.document.file,
+        title = title,
+        author = author,
+        -- Replaces characters that are invalid in filenames.
+        output_filename = util.getSafeFilename(title),
+        number_of_pages = view.document.info.number_of_pages,
+    }
+    self:parseAnnotations(view.ui.annotation.annotations, clippings[title])
     return clippings
 end
 

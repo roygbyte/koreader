@@ -34,8 +34,8 @@ if not busted_ok then
     end
 end
 
-package.path = "?.lua;common/?.lua;rocks/share/lua/5.1/?.lua;frontend/?.lua;" .. package.path
-package.cpath = "?.so;common/?.so;/usr/lib/lua/?.so;rocks/lib/lua/5.1/?.so;" .. package.cpath
+package.path = "?.lua;common/?.lua;frontend/?.lua;" .. package.path
+package.cpath = "?.so;common/?.so;/usr/lib/lua/?.so;" .. package.cpath
 
 -- turn off debug by default and set log level to warning
 require("dbg"):turnOff()
@@ -51,8 +51,9 @@ os.remove(DataStorage:getDataDir() .. "/defaults.tests.lua.old")
 G_defaults = require("luadefaults"):open(DataStorage:getDataDir() .. "/defaults.tests.lua")
 
 -- global reader settings
-os.remove(DataStorage:getDataDir().."/settings.reader.lua")
-G_reader_settings = require("luasettings"):open(".reader")
+os.remove(DataStorage:getDataDir() .. "/settings.tests.lua")
+os.remove(DataStorage:getDataDir() .. "/settings.tests.lua.old")
+G_reader_settings = require("luasettings"):open(DataStorage:getDataDir() .. "/settings.tests.lua")
 
 -- global einkfb for Screen (do not show SDL window)
 einkfb = require("ffi/framebuffer") --luacheck: ignore

@@ -5,9 +5,12 @@ Centralizes any and all one time migration concerns.
 local DataStorage = require("datastorage")
 local lfs = require("libs/libkoreader-lfs")
 local logger = require("logger")
+local SQ3 = require("lua-ljsqlite3/init")
+local util = require("util")
+local _ = require("gettext")
 
 -- Date at which the last migration snippet was added
-local CURRENT_MIGRATION_DATE = 20221027
+local CURRENT_MIGRATION_DATE = 20240616
 
 -- Retrieve the date of the previous migration, if any
 local last_migration_date = G_reader_settings:readSetting("last_migration_date", 0)
@@ -31,6 +34,15 @@ end
 -- ReaderTypography, https://github.com/koreader/koreader/pull/6072
 if last_migration_date < 20200421 then
     logger.info("Performing one-time migration for 20200421")
+
+    -- Drop the Fontlist cache early, in case it's in an incompatible format for some reason...
+    -- c.f., https://github.com/koreader/koreader/issues/9771#issuecomment-1546308746
+    -- (This is basically the 20220914 migration step applied preemptively, as readertypography *will* attempt to load it).
+    local cache_path = DataStorage:getDataDir() .. "/cache/fontlist"
+    local ok, err = os.remove(cache_path .. "/fontinfo.dat")
+    if not ok then
+       logger.warn("os.remove:", err)
+    end
 
     local ReaderTypography = require("apps/reader/modules/readertypography")
     -- Migrate old readerhyphenation settings
@@ -136,14 +148,16 @@ if last_migration_date < 20210330 then
     if not ok or not ReaderStatistics then
         logger.warn("Error when loading plugins/statistics.koplugin/main.lua:", ReaderStatistics)
     else
-        local settings = G_reader_settings:readSetting("statistics", ReaderStatistics.default_settings)
-        -- Handle a snafu in 2021.03 that could lead to an empty settings table on fresh installs.
-        for k, v in pairs(ReaderStatistics.default_settings) do
-            if settings[k] == nil then
-                settings[k] = v
+        local settings = G_reader_settings:readSetting("statistics")
+        if settings then
+            -- Handle a snafu in 2021.03 that could lead to an empty settings table on fresh installs.
+            for k, v in pairs(ReaderStatistics.default_settings) do
+                if settings[k] == nil then
+                    settings[k] = v
+                end
             end
+            G_reader_settings:saveSetting("statistics", settings)
         end
-        G_reader_settings:saveSetting("statistics", settings)
     end
 end
 
@@ -220,8 +234,9 @@ end
 
 -- 20210518, ReaderFooter, https://github.com/koreader/koreader/pull/7702
 -- 20210622, ReaderFooter, https://github.com/koreader/koreader/pull/7876
-if last_migration_date < 20210622 then
-    logger.info("Performing one-time migration for 20210622")
+-- 20240616, ReaderFooter, https://github.com/koreader/koreader/pull/11999
+if last_migration_date < 20240616 then
+    logger.info("Performing one-time migration for 20240616")
 
     local ReaderFooter = require("apps/reader/modules/readerfooter")
     local settings = G_reader_settings:readSetting("footer", ReaderFooter.default_settings)
@@ -493,6 +508,154 @@ if last_migration_date < 20221027 then
     local Device = require("device")
     if Device:isKobo() and not Device:hasReliableMxcWaitFor() then
         G_reader_settings:makeFalse("followed_link_marker")
+    end
+end
+
+-- 20230531, Rename `strcoll_mixed` to `strcoll`+`collate_mixed`, https://github.com/koreader/koreader/pull/10198
+if last_migration_date < 20230531 then
+    logger.info("Performing one-time migration for 20230531")
+    if G_reader_settings:readSetting("collate") == "strcoll_mixed" then
+        G_reader_settings:saveSetting("collate", "strcoll")
+        G_reader_settings:makeTrue("collate_mixed")
+    end
+end
+
+-- 20230703, FileChooser Sort by: "date modified" only
+if last_migration_date < 20230703 then
+    logger.info("Performing one-time migration for 20230703")
+    local collate = G_reader_settings:readSetting("collate")
+    if collate == "modification" or collate == "access" or collate == "change" then
+        G_reader_settings:saveSetting("collate", "date")
+    end
+end
+
+-- 20230707, OPDS, no more special calibre catalog
+if last_migration_date < 20230707 then
+    logger.info("Performing one-time migration for 20230707")
+
+    local calibre_opds = G_reader_settings:readSetting("calibre_opds")
+    if calibre_opds and calibre_opds.host and calibre_opds.port then
+        local opds_servers = G_reader_settings:readSetting("opds_servers") or {}
+        table.insert(opds_servers, 1, {
+            title    = _("Local calibre library"),
+            url      = string.format("http://%s:%d/opds", calibre_opds.host, calibre_opds.port),
+            username = calibre_opds.username,
+            password = calibre_opds.password,
+        })
+       G_reader_settings:saveSetting("opds_servers", opds_servers)
+       G_reader_settings:delSetting("calibre_opds")
+    end
+end
+
+-- 20230710, Migrate to a full settings table, and disable KOSync's auto sync mode if wifi_enable_action is not turn_on
+if last_migration_date < 20230710 then
+    logger.info("Performing one-time migration for 20230710")
+
+    -- c.f., PluginLoader
+    local package_path = package.path
+    package.path = string.format("%s/?.lua;%s", "plugins/kosync.koplugin", package_path)
+    local ok, KOSync = pcall(dofile, "plugins/kosync.koplugin/main.lua")
+    package.path = package_path
+    if not ok or not KOSync then
+        logger.warn("Error when loading plugins/kosync.koplugin/main.lua:", KOSync)
+    else
+        local settings = G_reader_settings:readSetting("kosync")
+        if settings then
+            -- Make sure the table is complete
+            for k, v in pairs(KOSync.default_settings) do
+                if settings[k] == nil then
+                    settings[k] = v
+                end
+            end
+
+            -- Migrate the whisper_* keys
+            settings.sync_forward = settings.whisper_forward or KOSync.default_settings.sync_forward
+            settings.whisper_forward = nil
+            settings.sync_backward = settings.whisper_backward or KOSync.default_settings.sync_backward
+            settings.whisper_backward = nil
+
+            G_reader_settings:saveSetting("kosync", settings)
+        end
+    end
+
+    local Device = require("device")
+    if Device:hasWifiToggle() and G_reader_settings:readSetting("wifi_enable_action") ~= "turn_on" then
+        local kosync = G_reader_settings:readSetting("kosync")
+        if kosync and kosync.auto_sync then
+            kosync.auto_sync = false
+            G_reader_settings:saveSetting("kosync", kosync)
+        end
+    end
+end
+
+-- 20230731, aka., "let's kill all those stupid and weird mxcfb workarounds"
+if last_migration_date < 20230731 then
+    logger.info("Performing one-time migration for 20230731")
+
+    local Device = require("device")
+    if Device:isKobo() then
+        if not Device:hasReliableMxcWaitFor() then
+            G_reader_settings:delSetting("followed_link_marker")
+        end
+    end
+end
+
+-- 20230802, Statistics plugin null id_book in page_stat_data
+if last_migration_date < 20230802 then
+    logger.info("Performing one-time migration for 20230802")
+    local db_location = DataStorage:getSettingsDir() .. "/statistics.sqlite3"
+    if util.fileExists(db_location) then
+        local conn = SQ3.open(db_location)
+        local ok, value = pcall(conn.exec, conn, "PRAGMA table_info('page_stat_data')")
+        if ok and value then
+            -- Has table
+            conn:exec("DELETE FROM page_stat_data WHERE id_book IS null;")
+            local ok2, errmsg = pcall(conn.exec, conn, "VACUUM;")
+            if not ok2 then
+                logger.warn("Failed compacting statistics database when fixing null id_book:", errmsg)
+            end
+        else
+            logger.warn("db not compatible when performing onetime migration:", ok, value)
+        end
+        conn:close()
+    else
+        logger.info("statistics.sqlite3 not found.")
+    end
+end
+
+-- 20230901, new handling of the pdf contrast ("gamma") setting
+if last_migration_date < 20230901 then
+    logger.info("Performing one-time migration for 20230901")
+
+    local contrast = G_reader_settings:readSetting("kopt_contrast")
+    if contrast then
+        G_reader_settings:saveSetting("kopt_contrast", 1 / contrast)
+    end
+end
+
+-- 20231217, change folder_shortcuts setting from array to hash table
+if last_migration_date < 20231217 then
+    logger.info("Performing one-time migration for 20231217")
+
+    local shortcuts = G_reader_settings:readSetting("folder_shortcuts")
+    if shortcuts and shortcuts[1] ~= nil then
+        local now = os.time()
+        local new_shortcuts = {}
+        for i, item in ipairs(shortcuts) do
+            new_shortcuts[item.folder] = { text = item.text, time = now + i }
+        end
+        G_reader_settings:saveSetting("folder_shortcuts", new_shortcuts)
+    end
+end
+
+-- 20240408, drop sleep screen/screensaver image_file setting in favor of document cover
+if last_migration_date < 20240408 then
+    logger.info("Performing one-time migration for 20240408")
+
+    local image_file = G_reader_settings:readSetting("screensaver_type") == "image_file" and G_reader_settings:readSetting("screensaver_image")
+    if image_file then
+        G_reader_settings:saveSetting("screensaver_type", "document_cover")
+        G_reader_settings:saveSetting("screensaver_document_cover", image_file)
     end
 end
 

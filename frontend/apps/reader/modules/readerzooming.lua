@@ -230,11 +230,10 @@ function ReaderZooming:onReadSettings(config)
         -- Otherwise, build it from the split genus & type settings
         local zoom_mode_genus = config:readSetting("kopt_zoom_mode_genus")
                              or G_reader_settings:readSetting("kopt_zoom_mode_genus")
+                             or 3 -- autocrop is default then pagewidth will be the default as well
         local zoom_mode_type = config:readSetting("kopt_zoom_mode_type")
                             or G_reader_settings:readSetting("kopt_zoom_mode_type")
-        if zoom_mode_genus or zoom_mode_type then
-            zoom_mode = self:combo_to_mode(zoom_mode_genus, zoom_mode_type)
-        end
+        zoom_mode = self:combo_to_mode(zoom_mode_genus, zoom_mode_type)
 
         -- Validate it
         zoom_mode = self.zoom_mode_label[zoom_mode] and zoom_mode or self.DEFAULT_ZOOM_MODE
@@ -262,7 +261,8 @@ function ReaderZooming:onReadSettings(config)
                             or G_reader_settings:readSetting("kopt_zoom_overlap_v") or self.zoom_overlap_v
 
     -- update zoom direction parameters
-    local zoom_direction_setting = self.zoom_direction_settings[self.document.configurable.zoom_direction]
+    local zoom_direction_setting = self.zoom_direction_settings[self.document.configurable.zoom_direction
+                                                                or G_reader_settings:readSetting("kopt_zoom_direction") or 7]
     self.zoom_bottom_to_top = zoom_direction_setting.zoom_bottom_to_top
     self.zoom_direction_vertical = zoom_direction_setting.zoom_direction_vertical
 end

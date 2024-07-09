@@ -5,7 +5,9 @@ This module defines stubs for common methods.
 --]]
 
 local DataStorage = require("datastorage")
+local Event = require("ui/event")
 local Geom = require("ui/geometry")
+local UIManager -- Updated on UIManager init
 local logger = require("logger")
 local ffi = require("ffi")
 local time = require("ui/time")
@@ -39,13 +41,20 @@ local Device = {
     hasAuxBattery = no,
     hasKeyboard = no,
     hasKeys = no,
+    hasScreenKB = no, -- in practice only some Kindles
+    hasSymKey = no, -- in practice only some Kindles
+    canKeyRepeat = no,
     hasDPad = no,
+    useDPadAsActionKeys = no,
     hasExitOptions = yes,
     hasFewKeys = no,
     hasWifiToggle = yes,
+    hasSeamlessWifiToggle = yes, -- Can toggle Wi-Fi without focus loss and extra user interaction (i.e., not Android)
     hasWifiManager = no,
+    hasWifiRestore = no,
     isDefaultFullscreen = yes,
     isHapticFeedbackEnabled = no,
+    isDeprecated = no, -- device no longer receive OTA updates
     isTouchDevice = no,
     hasFrontlight = no,
     hasNaturalLight = no, -- FL warmth implementation specific to NTX boards (Kobo, Cervantes)
@@ -56,6 +65,7 @@ local Device = {
     hasExternalSD = no, -- or other storage volume that cannot be accessed using the File Manager
     canHWDither = no,
     canHWInvert = no,
+    hasKaleidoWfm = no,
     canDoSwipeAnimation = no,
     canModifyFBInfo = no, -- some NTX boards do wonky things with the rotate flag after a FBIOPUT_VSCREENINFO ioctl
     canUseCBB = yes, -- The C BB maintains a 1:1 feature parity with the Lua BB, except that is has NO support for BB4, and limited support for BBRGB24
@@ -67,6 +77,7 @@ local Device = {
     isGSensorLocked = no,
     canToggleMassStorage = no,
     canToggleChargingLED = no,
+    _updateChargingLED = nil,
     canUseWAL = yes, -- requires mmap'ed I/O on the target FS
     canRestart = yes,
     canSuspend = no,
@@ -159,6 +170,30 @@ function Device:invertButtons()
     end
 end
 
+function Device:invertButtonsLeft()
+    if self:hasKeys() and self.input and self.input.event_map then
+        for key, value in pairs(self.input.event_map) do
+            if value == "LPgFwd" then
+                self.input.event_map[key] = "LPgBack"
+            elseif value == "LPgBack" then
+                self.input.event_map[key] = "LPgFwd"
+            end
+        end
+    end
+end
+
+function Device:invertButtonsRight()
+    if self:hasKeys() and self.input and self.input.event_map then
+        for key, value in pairs(self.input.event_map) do
+            if value == "RPgFwd" then
+                self.input.event_map[key] = "RPgBack"
+            elseif value == "RPgBack" then
+                self.input.event_map[key] = "RPgFwd"
+            end
+        end
+    end
+end
+
 function Device:init()
     if not self.screen then
         error("screen/framebuffer must be implemented")
@@ -222,6 +257,12 @@ function Device:init()
         if G_reader_settings:isTrue("input_invert_page_turn_keys") then
             self:invertButtons()
         end
+        if G_reader_settings:isTrue("input_invert_left_page_turn_keys") then
+            self:invertButtonsLeft()
+        end
+        if G_reader_settings:isTrue("input_invert_right_page_turn_keys") then
+            self:invertButtonsRight()
+        end
     end
 
     if self:hasGSensor() then
@@ -242,6 +283,47 @@ function Device:init()
         local rect = self.screen.getRawSize(self.screen)
         return Geom:new{ x = rect.x, y = rect.y, w = rect.w, h = rect.h }
     end
+
+    -- DPI
+    local dpi_override = G_reader_settings:readSetting("screen_dpi")
+    if dpi_override ~= nil then
+        self:setScreenDPI(dpi_override)
+    end
+
+    -- Night mode
+    self.orig_hw_nightmode = self.screen:getHWNightmode()
+    if G_reader_settings:isTrue("night_mode") then
+        self.screen:toggleNightMode()
+    end
+
+    -- Ensure the proper rotation on startup.
+    -- We default to the rotation KOReader closed with.
+    -- If the rotation is not locked it will be overridden by a book or the FM when opened.
+    local rotation_mode = G_reader_settings:readSetting("closed_rotation_mode")
+    if rotation_mode and rotation_mode ~= self.screen:getRotationMode() then
+        self.screen:setRotationMode(rotation_mode)
+    end
+
+    -- Dithering
+    if self:hasEinkScreen() then
+        self.screen:setupDithering()
+        if self.screen.hw_dithering and G_reader_settings:isTrue("dev_no_hw_dither") then
+            self.screen:toggleHWDithering(false)
+        end
+        if self.screen.sw_dithering and G_reader_settings:isTrue("dev_no_sw_dither") then
+            self.screen:toggleSWDithering(false)
+        end
+        -- NOTE: If device can HW dither (i.e., after setupDithering(), hw_dithering is true, but sw_dithering is false),
+        --       but HW dither is explicitly disabled, and SW dither enabled, don't leave SW dither disabled (i.e., re-enable sw_dithering)!
+        if self:canHWDither() and G_reader_settings:isTrue("dev_no_hw_dither") and G_reader_settings:nilOrFalse("dev_no_sw_dither") then
+            self.screen:toggleSWDithering(true)
+        end
+    end
+
+    -- Can't be seamless if you can't do it at all ;)
+    if not self:hasWifiToggle() then
+        self.hasSeamlessWifiToggle = no
+    end
 end
 
 function Device:setScreenDPI(dpi_override)
@@ -259,7 +341,6 @@ function Device:getPowerDevice()
 end
 
 function Device:rescheduleSuspend()
-    local UIManager = require("ui/uimanager")
     UIManager:unschedule(self.suspend)
     UIManager:scheduleIn(self.suspend_wait_timeout, self.suspend, self)
 end
@@ -270,45 +351,47 @@ function Device:onPowerEvent(ev)
     if self.screen_saver_mode then
         if ev == "Power" or ev == "Resume" then
             if self.is_cover_closed then
-                -- don't let power key press wake up device when the cover is in closed state.
+                -- Don't let power key press wake up device when the cover is in closed state.
+                logger.dbg("Pressed power while asleep in screen saver mode with a closed sleepcover, going back to suspend...")
                 self:rescheduleSuspend()
             else
                 logger.dbg("Resuming...")
-                local UIManager = require("ui/uimanager")
                 UIManager:unschedule(self.suspend)
-                if self:hasWifiManager() then
-                    local network_manager = require("ui/network/manager")
-                    if network_manager.wifi_was_on and G_reader_settings:isTrue("auto_restore_wifi") then
-                        network_manager:restoreWifiAsync()
-                        network_manager:scheduleConnectivityCheck()
-                    end
-                end
                 self:resume()
                 local widget_was_closed = Screensaver:close()
                 if widget_was_closed and self:needsScreenRefreshAfterResume() then
-                    UIManager:scheduleIn(1, function() self.screen:refreshFull() end)
+                    UIManager:scheduleIn(1, function() self.screen:refreshFull(0, 0, self.screen:getWidth(), self.screen:getHeight()) end)
                 end
                 self.powerd:afterResume()
             end
         elseif ev == "Suspend" then
-            -- Already in screen saver mode, no need to update UI/state before
-            -- suspending the hardware. This usually happens when sleep cover
-            -- is closed after the device was sent to suspend state.
-            logger.dbg("Already in screen saver mode, going back to suspend...")
+            -- Already in screen saver mode, no need to update the UI (and state, usually) before suspending again.
+            -- This usually happens when the sleep cover is closed on an already sleeping device,
+            -- (e.g., it was previously suspended via the Power button).
+            if self.screen_saver_lock then
+                -- This can only happen when some sort of screensaver_delay is set,
+                -- and the user presses the Power button *after* already having woken up the device.
+                -- In this case, we want to go back to suspend *without* affecting the screensaver,
+                -- so we simply mimic our own behavior when *not* in screen_saver_mode ;).
+                logger.dbg("Pressed power while awake in screen saver mode, going back to suspend...")
+                -- Basically, this is the only difference.
+                -- We need it because we're actually in a sane post-Resume event state right now.
+                self.powerd:beforeSuspend()
+            else
+                logger.dbg("Already in screen saver mode, going back to suspend...")
+            end
             -- Much like the real suspend codepath below, in case we got here via screen_saver_lock,
             -- make sure we murder WiFi again (because restore WiFi on resume could have kicked in).
             if self:hasWifiToggle() then
                 local network_manager = require("ui/network/manager")
                 if network_manager:isWifiOn() then
-                    network_manager:releaseIP()
-                    network_manager:turnOffWifi()
+                    network_manager:disableWifi()
                 end
             end
             self:rescheduleSuspend()
         end
     -- else we were not in screensaver mode
     elseif ev == "Power" or ev == "Suspend" then
-        local UIManager = require("ui/uimanager")
         logger.dbg("Suspending...")
         -- Add the current state of the SleepCover flag...
         logger.dbg("Sleep cover is", self.is_cover_closed and "closed" or "open")
@@ -322,7 +405,7 @@ function Device:onPowerEvent(ev)
         --       and on platforms where we defer to a system tool, it'd probably suspend too early!
         --       c.f., #6676
         if self:needsScreenRefreshAfterResume() then
-            self.screen:refreshFull()
+            self.screen:refreshFull(0, 0, self.screen:getWidth(), self.screen:getHeight())
         end
         -- NOTE: In the same vein as above, make sure we update the screen *now*, before dealing with Wi-Fi.
         UIManager:forceRePaint()
@@ -335,8 +418,7 @@ function Device:onPowerEvent(ev)
             --       because suspend will at best fail, and at worst deadlock the system if Wi-Fi is on,
             --       regardless of who enabled it!
             if network_manager:isWifiOn() then
-                network_manager:releaseIP()
-                network_manager:turnOffWifi()
+                network_manager:disableWifi()
             end
         end
         -- Only turn off the frontlight *after* we've displayed the screensaver and dealt with Wi-Fi,
@@ -348,7 +430,6 @@ end
 
 function Device:showLightDialog()
     local FrontLightWidget = require("ui/widget/frontlightwidget")
-    local UIManager = require("ui/uimanager")
     UIManager:show(FrontLightWidget:new{})
 end
 
@@ -357,8 +438,6 @@ function Device:info()
 end
 
 function Device:install()
-    local Event = require("ui/event")
-    local UIManager = require("ui/uimanager")
     local ConfirmBox = require("ui/widget/confirmbox")
     UIManager:show(ConfirmBox:new{
         text = _("Update is ready. Install it now?"),
@@ -370,6 +449,15 @@ function Device:install()
             end
             UIManager:broadcastEvent(Event:new("Exit", save_quit))
         end,
+        cancel_text = _("Later"),
+        cancel_callback = function()
+            local InfoMessage = require("ui/widget/infomessage")
+            UIManager:show(InfoMessage:new{
+                text = _("The update will be applied the next time KOReader is started."),
+                unmovable = true,
+            })
+        end,
+        unmovable = true,
     })
 end
 
@@ -428,6 +516,12 @@ function Device:simulateResume() end
 -- Put device into standby, input devices (buttons, touchscreen ...) stay enabled
 function Device:standby(max_duration) end
 
+
+-- Returns a string, used to determine the platform to fetch OTA updates
+function Device:otaModel()
+    return self.ota_model, "ota"
+end
+
 --[[--
 Device specific method for performing haptic feedback.
 
@@ -483,19 +577,38 @@ function Device:setupChargingLED() end
 function Device:enableCPUCores(amount) end
 
 -- NOTE: For this to work, all three must be implemented, and getKeyRepeat must be run on init (c.f., Kobo)!
--- Device specific method to get the current key repeat setup
+-- Device specific method to get the current key repeat setup (and is responsible for setting the canKeyRepeat cap)
 function Device:getKeyRepeat() end
 -- Device specific method to disable key repeat
 function Device:disableKeyRepeat() end
--- Device specific method to restore key repeat
+-- Device specific method to restore the initial key repeat config
 function Device:restoreKeyRepeat() end
+-- NOTE: This one is for the user-facing toggle, it *ignores* the stock delay/period combo,
+--       opting instead for a hard-coded one (as we can't guarantee that key repeat is actually setup properly or at all).
+-- Device specific method to toggle key repeat
+function Device:toggleKeyRepeat(toggle) end
 
 --[[
 prepare for application shutdown
 --]]
 function Device:exit()
+    -- Save any implementation-specific settings
+    self:saveSettings()
+
+    -- Save current rotation (or the original rotation if ScreenSaver temporarily modified it) to remember it for next startup
+    G_reader_settings:saveSetting("closed_rotation_mode", self.orig_rotation_mode or self.screen:getRotationMode())
+
+    -- Restore initial HW inversion state
+    self.screen:setHWNightmode(self.orig_hw_nightmode)
+
+    -- Tear down the fb backend
     self.screen:close()
-    require("ffi/input"):closeAll()
+
+    -- Flush settings to disk
+    G_reader_settings:close()
+
+    -- I/O teardown
+    self.input.teardown()
 end
 
 -- Lifted from busybox's libbb/inet_cksum.c
@@ -791,12 +904,16 @@ function Device:retrieveNetworkInfo()
                             else
                                 local essid_on = iwr.u.data.flags
                                 if essid_on ~= 0 then
+                                    -- Knowing the token index may be fun, bit it isn't in fact, super interesting...
+                                    --[[
                                     local token_index = bit.band(essid_on, C.IW_ENCODE_INDEX)
                                     if token_index > 1 then
                                         table.insert(results, T(_("SSID: \"%1\" [%2]"), ffi.string(essid), token_index))
                                     else
                                         table.insert(results, T(_("SSID: \"%1\""), ffi.string(essid)))
                                     end
+                                    --]]
+                                    table.insert(results, T(_("SSID: \"%1\""), ffi.string(essid)))
                                 else
                                     table.insert(results, _("SSID: off/any"))
                                 end
@@ -925,8 +1042,31 @@ function Device:untar(archive, extract_to, with_stripped_root)
     return os.execute(cmd:format(archive, extract_to))
 end
 
+-- Update our UIManager reference once it's ready
+function Device:_UIManagerReady(uimgr)
+    -- Our own ref
+    UIManager = uimgr
+    -- Let implementations do the same thing
+    self:UIManagerReady(uimgr)
+
+    -- Forward that to PowerD
+    self.powerd:UIManagerReady(uimgr)
+
+    -- And to Input
+    self.input:UIManagerReady(uimgr)
+
+    -- Setup PM event handlers
+    -- NOTE: We keep forwarding the uimgr reference because some implementations don't actually have a module-local UIManager ref to update
+    self:_setEventHandlers(uimgr)
+
+    -- Returns a self-debouncing scheduling call (~4s to give some leeway to the kernel, and debounce to deal with potential chattering)
+    self._updateChargingLED = UIManager:debounce(4, false, function() self:setupChargingLED() end)
+end
+-- In case implementations *also* need a reference to UIManager, *this* is the one to implement!
+function Device:UIManagerReady(uimgr) end
+
 -- Set device event handlers common to all devices
-function Device:_setEventHandlers(UIManager)
+function Device:_setEventHandlers(uimgr)
     if self:canReboot() then
         UIManager.event_handlers.Reboot = function(message_text)
             local ConfirmBox = require("ui/widget/confirmbox")
@@ -934,8 +1074,6 @@ function Device:_setEventHandlers(UIManager)
                 text = message_text or _("Are you sure you want to reboot the device?"),
                 ok_text = _("Reboot"),
                 ok_callback = function()
-                    local Event = require("ui/event")
-                    UIManager:broadcastEvent(Event:new("Reboot"))
                     UIManager:nextTick(UIManager.reboot_action)
                 end,
             })
@@ -951,8 +1089,6 @@ function Device:_setEventHandlers(UIManager)
                 text = message_text or _("Are you sure you want to power off the device?"),
                 ok_text = _("Power off"),
                 ok_callback = function()
-                    local Event = require("ui/event")
-                    UIManager:broadcastEvent(Event:new("PowerOff"))
                     UIManager:nextTick(UIManager.poweroff_action)
                 end,
             })
@@ -968,7 +1104,6 @@ function Device:_setEventHandlers(UIManager)
                 text = message_text or _("This will take effect on next restart."),
                 ok_text = _("Restart now"),
                 ok_callback = function()
-                    local Event = require("ui/event")
                     UIManager:broadcastEvent(Event:new("Restart"))
                 end,
                 cancel_text = _("Restart later"),
@@ -983,24 +1118,23 @@ function Device:_setEventHandlers(UIManager)
         end
     end
 
-    self:setEventHandlers(UIManager)
+    -- Let implementations expand on that
+    self:setEventHandlers(uimgr)
 end
 
--- Devices can add additional event handlers by overwriting this method.
-function Device:setEventHandlers(UIManager)
-    -- These will be most probably overwritten in the device specific `setEventHandlers`
+-- Devices can add additional event handlers by implementing this method.
+function Device:setEventHandlers(uimgr)
+    -- These will most probably be overwritten by device-specific `setEventHandlers` implementations
     UIManager.event_handlers.Suspend = function()
-        self:_beforeSuspend(false)
+        self.powerd:beforeSuspend()
     end
     UIManager.event_handlers.Resume = function()
-        self:_afterResume(false)
+        self.powerd:afterResume()
     end
 end
 
 -- The common operations that should be performed before suspending the device.
 function Device:_beforeSuspend(inhibit)
-    local Event = require("ui/event")
-    local UIManager = require("ui/uimanager")
     UIManager:flushSettings()
     UIManager:broadcastEvent(Event:new("Suspend"))
 
@@ -1016,33 +1150,30 @@ end
 -- The common operations that should be performed after resuming the device.
 function Device:_afterResume(inhibit)
     if inhibit ~= false then
-        -- Restore key repeat
-        self:restoreKeyRepeat()
+        -- Restore key repeat if it's not disabled
+        if G_reader_settings:nilOrFalse("input_no_key_repeat") then
+            self:restoreKeyRepeat()
+        end
 
         -- Restore full input handling
         self.input:inhibitInput(false)
     end
 
-    local Event = require("ui/event")
-    local UIManager = require("ui/uimanager")
     UIManager:broadcastEvent(Event:new("Resume"))
 end
 
 -- The common operations that should be performed when the device is plugged to a power source.
 function Device:_beforeCharging()
-    -- Leave the kernel some time to figure it out ;o).
-    local Event = require("ui/event")
-    local UIManager = require("ui/uimanager")
-    UIManager:scheduleIn(1, function() self:setupChargingLED() end)
+    -- Invalidate the capacity cache to make sure we poll up-to-date values for the LED check
+    self.powerd:invalidateCapacityCache()
+    self:_updateChargingLED()
     UIManager:broadcastEvent(Event:new("Charging"))
 end
 
 -- The common operations that should be performed when the device is unplugged from a power source.
 function Device:_afterNotCharging()
-    -- Leave the kernel some time to figure it out ;o).
-    local Event = require("ui/event")
-    local UIManager = require("ui/uimanager")
-    UIManager:scheduleIn(1, function() self:setupChargingLED() end)
+    self.powerd:invalidateCapacityCache()
+    self:_updateChargingLED()
     UIManager:broadcastEvent(Event:new("NotCharging"))
 end
 

@@ -1,6 +1,7 @@
 local BD = require("ui/bidi")
 local Device = require("device")
 local Event = require("ui/event")
+local FileManagerBookInfo = require("apps/filemanager/filemanagerbookinfo")
 local InfoMessage = require("ui/widget/infomessage")
 local MultiConfirmBox = require("ui/widget/multiconfirmbox")
 local UIManager = require("ui/uimanager")
@@ -83,9 +84,9 @@ local LANGUAGES = {
     { "pt-BR",                 {},   "HB  ",   _("Portuguese (BR)"),        "Portuguese_BR.pattern" },
     { "rm",               {"roh"},   "H   ",   _("Romansh"),                "Romansh.pattern" },
     { "ro",               {"ron"},   "H   ",   _("Romanian"),               "Romanian.pattern" },
-    { "ru",               {"rus"},   "Hb  ",   _("Russian"),                "Russian.pattern" },
-    { "ru-GB",                 {},   "Hb  ",   _("Russian + English (UK)"), "Russian_EnGB.pattern" },
-    { "ru-US",                 {},   "Hb  ",   _("Russian + English (US)"), "Russian_EnUS.pattern" },
+    { "ru",               {"rus"},   "HB  ",   _("Russian"),                "Russian.pattern" },
+    { "ru-GB",                 {},   "HB  ",   _("Russian + English (UK)"), "Russian_EnGB.pattern" },
+    { "ru-US",                 {},   "HB  ",   _("Russian + English (US)"), "Russian_EnUS.pattern" },
     { "sr",               {"srp"},   "HB  ",   _("Serbian"),                "Serbian.pattern" },
     { "sk",               {"slk"},   "HB  ",   _("Slovak"),                 "Slovak.pattern" },
     { "sl",               {"slv"},   "H   ",   _("Slovenian"),              "Slovenian.pattern" },
@@ -196,11 +197,10 @@ When the book's language tag is not among our presets, no specific features will
             -- Text might be too long for InfoMessage
             local status_text = table.concat(lang_infos, "\n")
             local TextViewer = require("ui/widget/textviewer")
-            local Font = require("ui/font")
             UIManager:show(TextViewer:new{
                 title = _("Language tags (and hyphenation dictionaries) used since start up"),
                 text = status_text,
-                text_face = Font:getFace("smallinfont"),
+                text_type = "code",
                 height = math.floor(Screen:getHeight() * 0.8),
             })
         end,
@@ -776,7 +776,8 @@ end
 function ReaderTypography:onPreRenderDocument(config)
     -- This is called after the document has been loaded,
     -- when we know and can access the document language.
-    local doc_language = self.ui.document:getProps().language
+    local doc_language = FileManagerBookInfo.getCustomProp("language", self.ui.document.file)
+                      or self.ui.document:getProps().language
     self.book_lang_tag = self:fixLangTag(doc_language)
 
     local is_known_lang_tag = self.book_lang_tag and LANG_TAG_TO_LANG_NAME[self.book_lang_tag] ~= nil

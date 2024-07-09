@@ -1,4 +1,6 @@
 local Generic = require("device/generic/device") -- <= look at this file!
+local Geom = require("ui/geometry")
+local UIManager
 local logger = require("logger")
 local ffi = require("ffi")
 local C = ffi.C
@@ -19,6 +21,7 @@ local app_name = "koreader.app"
 
 local PocketBook = Generic:extend{
     model = "PocketBook",
+    ota_model = "pocketbook",
     isPocketBook = yes,
     hasOTAUpdates = yes,
     hasWifiToggle = yes,
@@ -54,9 +57,7 @@ local PocketBook = Generic:extend{
         -- Works same as input.event_map, but for raw input EV_KEY translation
         keymap = { [scan] = event },
     }]]
-    -- Runtime state: whether raw input is actually used
-    --- @fixme: Never actually set anywhere?
-    is_using_raw_input = nil,
+    -- We'll nil raw_input at runtime if it cannot be used.
 
     -- InkView may have started translating button codes based on rotation on newer devices...
     -- That historically wasn't the case, hence this defaulting to false.
@@ -240,7 +241,9 @@ function PocketBook:init()
     -- NOTE: This all happens in ffi/input_pocketbook.lua
 
     self._model_init()
-    if (not self.input.raw_input) or (not pcall(self.input.open, self.input, self.raw_input)) then
+    -- NOTE: This is the odd one out actually calling input.open as a *method*,
+    --       which the imp supports to get access to self.input.raw_input
+    if (not self.input.raw_input) or (not pcall(self.input.open, self.input)) then
         inkview.OpenScreen()
         -- Raw mode open failed (no permissions?), so we'll run the usual way.
         -- Disable touch coordinate translation as inkview will do that.
@@ -253,6 +256,21 @@ function PocketBook:init()
     self.powerd = require("device/pocketbook/powerd"):new{device = self}
     self:setAutoStandby(true)
     Generic.init(self)
+end
+
+function PocketBook:exit()
+    -- Exit code can be shoddy on some devices due to broken library dtors calling _exit(0) from os.exit(N)
+    local ko_exit = os.getenv("KO_EXIT_CODE")
+    if ko_exit then
+        local f = io.open(ko_exit, "w+")
+        if f then
+            -- As returned by UIManager:run() in reader.lua
+            f:write(tostring(UIManager._exit_code))
+            f:close()
+        end
+    end
+
+    Generic.exit(self)
 end
 
 function PocketBook:notifyBookState(title, document)
@@ -333,8 +351,6 @@ function PocketBook:reboot()
 end
 
 function PocketBook:initNetworkManager(NetworkMgr)
-    local UIManager = require("ui/uimanager")
-
     local function keepWifiAlive()
         -- Make sure only one wifiKeepAlive is scheduled
         UIManager:unschedule(keepWifiAlive)
@@ -372,6 +388,14 @@ function PocketBook:initNetworkManager(NetworkMgr)
         return band(inkview.QueryNetwork(), C.NET_CONNECTED) ~= 0
     end
     NetworkMgr.isWifiOn = NetworkMgr.isConnected
+
+    function NetworkMgr:isOnline()
+        -- Fail early if we don't even have a default route, otherwise we're
+        -- unlikely to be online and canResolveHostnames would never succeed
+        -- again because PocketBook's glibc parses /etc/resolv.conf on first
+        -- use only. See https://sourceware.org/bugzilla/show_bug.cgi?id=984
+        return NetworkMgr:hasDefaultRoute() and NetworkMgr:canResolveHostnames()
+    end
 end
 
 function PocketBook:getSoftwareVersion()
@@ -386,19 +410,42 @@ function PocketBook:getDefaultCoverPath()
     return "/mnt/ext1/system/logo/offlogo/cover.bmp"
 end
 
-function PocketBook:setEventHandlers(UIManager)
+function PocketBook:UIManagerReady(uimgr)
+    UIManager = uimgr
+end
+
+function PocketBook:setEventHandlers(uimgr)
     -- Only fg/bg state plugin notifiers, not real power event.
     UIManager.event_handlers.Suspend = function()
-        self:_beforeSuspend()
+        self.powerd:beforeSuspend()
     end
     UIManager.event_handlers.Resume = function()
-        self:_afterResume()
+        self.powerd:afterResume()
     end
     UIManager.event_handlers.Exit = function()
         local Event = require("ui/event")
         UIManager:broadcastEvent(Event:new("Close"))
         UIManager:quit(0)
     end
+end
+
+local function getBrowser()
+    if util.pathExists("/usr/bin/browser.app") then
+        return true, "/usr/bin/browser.app"
+    elseif util.pathExists("/ebrmain/bin/browser.app") then
+        return true, "/ebrmain/bin/browser.app"
+    end
+    return false
+end
+
+function PocketBook:canOpenLink()
+    return inkview.MultitaskingSupported() and getBrowser()
+end
+
+function PocketBook:openLink(link)
+    local found, bin = getBrowser()
+    if not found or not link or type(link) ~= "string" then return end
+    inkview.OpenBook(bin, link, 0)
 end
 
 -- Pocketbook HW rotation modes start from landsape, CCW
@@ -445,6 +492,7 @@ local PocketBook613 = PocketBook:extend{
     display_dpi = 167,
     isTouchDevice = no,
     hasWifiToggle = no,
+    hasSeamlessWifiToggle = no,
     hasFrontlight = no,
     hasDPad = yes,
     hasFewKeys = yes,
@@ -486,6 +534,12 @@ local PocketBook617 = PocketBook:extend{
     hasDPad = yes,
     hasFewKeys = yes,
     hasNaturalLight = yes,
+}
+
+-- PocketBook Basic Lux 4 (618)
+local PocketBook618 = PocketBook:extend{
+    model = "PBBLux4",
+    display_dpi = 212,
 }
 
 -- PocketBook Touch (622)
@@ -537,6 +591,14 @@ local PocketBook628 = PocketBook:extend{
     hasNaturalLight = yes,
 }
 
+-- PocketBook Verse (629)
+local PocketBook629 = PocketBook:extend{
+    model = "PB629",
+    display_dpi = 212,
+    isAlwaysPortrait = yes,
+    hasNaturalLight = yes,
+}
+
 -- PocketBook Sense / Sense 2 (630)
 local PocketBook630 = PocketBook:extend{
     model = "PBSense",
@@ -564,12 +626,19 @@ local PocketBook632 = PocketBook:extend{
 local PocketBook633 = PocketBook:extend{
     model = "PBColor",
     display_dpi = 300,
-    color_saturation = 1.5,
     hasColorScreen = yes,
     canHWDither = yes, -- Adjust color saturation with inkview
     canUseCBB = no, -- 24bpp
     isAlwaysPortrait = yes,
     usingForcedRotation = landscape_ccw,
+}
+
+-- PocketBook Verse Pro (634)
+local PocketBook634 = PocketBook:extend{
+    model = "PB634",
+    display_dpi = 300,
+    isAlwaysPortrait = yes,
+    hasNaturalLight = yes,
 }
 
 -- PocketBook Aqua (640)
@@ -599,6 +668,24 @@ local PocketBook700 = PocketBook:extend{
     -- c.f., https://github.com/koreader/koreader/issues/9556
     inkview_translates_buttons = true,
 }
+
+-- PocketBook Era Color (PB700K3)
+local PocketBook700K3 = PocketBook:extend{
+    model = "PBEraColor",
+    display_dpi = 300,
+    hasColorScreen = yes,
+    canHWDither = yes, -- Adjust color saturation with inkview
+    canUseCBB = no, -- 24bpp
+    isAlwaysPortrait = yes,
+    hasNaturalLight = yes,
+    -- c.f., https://github.com/koreader/koreader/issues/9556
+    inkview_translates_buttons = true,
+}
+
+function PocketBook700K3._fb_init(fb, finfo, vinfo)
+    -- Pocketbook Color Lux reports bits_per_pixel = 8, but actually uses an RGB24 framebuffer
+    vinfo.bits_per_pixel = 24
+end
 
 -- PocketBook InkPad 3 (740)
 local PocketBook740 = PocketBook:extend{
@@ -630,7 +717,6 @@ local PocketBook740_2 = PocketBook:extend{
 local PocketBook741 = PocketBook:extend{
     model = "PBInkPadColor",
     display_dpi = 300,
-    color_saturation = 1.5,
     hasColorScreen = yes,
     canHWDither = yes, -- Adjust color saturation with inkview
     canUseCBB = no, -- 24bpp
@@ -643,11 +729,54 @@ function PocketBook741._fb_init(fb, finfo, vinfo)
     vinfo.bits_per_pixel = 24
 end
 
+-- PocketBook InkPad Color 2 (743C)
+local PocketBook743C = PocketBook:extend{
+    model = "PBInkPadColor2",
+    display_dpi = 300,
+    hasColorScreen = yes,
+    canHWDither = yes, -- Adjust color saturation with inkview
+    canUseCBB = no, -- 24bpp
+    isAlwaysPortrait = yes,
+    usingForcedRotation = landscape_ccw,
+    hasNaturalLight = yes,
+}
+
+function PocketBook743C._fb_init(fb, finfo, vinfo)
+    -- Pocketbook Color Lux reports bits_per_pixel = 8, but actually uses an RGB24 framebuffer
+    vinfo.bits_per_pixel = 24
+end
+
+-- PocketBook InkPad Color 3 (743K3)
+local PocketBook743K3 = PocketBook:extend{
+    model = "PBInkPadColor3",
+    display_dpi = 300,
+    viewport = Geom:new{x=3, y=2, w=1395, h=1864},
+    hasColorScreen = yes,
+    canHWDither = yes, -- Adjust color saturation with inkview
+    canUseCBB = no, -- 24bpp
+    isAlwaysPortrait = yes,
+    usingForcedRotation = landscape_ccw,
+    hasNaturalLight = yes,
+}
+
+function PocketBook743K3._fb_init(fb, finfo, vinfo)
+    -- Pocketbook Color Lux reports bits_per_pixel = 8, but actually uses an RGB24 framebuffer
+    vinfo.bits_per_pixel = 24
+end
+
+-- PocketBook InkPad 4 (743G/743g)
+local PocketBook743G = PocketBook:extend{
+    model = "PBInkPad4",
+    display_dpi = 300,
+    isAlwaysPortrait = yes,
+    usingForcedRotation = landscape_ccw,
+    hasNaturalLight = yes,
+}
+
 -- PocketBook Color Lux (801)
 local PocketBookColorLux = PocketBook:extend{
     model = "PBColorLux",
     display_dpi = 125,
-    color_saturation = 1.5,
     hasColorScreen = yes,
     canHWDither = yes, -- Adjust color saturation with inkview
     canUseCBB = no, -- 24bpp
@@ -688,71 +817,91 @@ local PocketBook1040 = PocketBook:extend{
 
 logger.info('SoftwareVersion: ', PocketBook:getSoftwareVersion())
 
-local codename = PocketBook:getDeviceModel()
+local full_codename = PocketBook:getDeviceModel()
 
-if codename == "PocketBook 515" then
+-- Pocketbook codenames are all over the place:
+local codename = full_codename
+-- "PocketBook 615 (PB615)"
+codename = codename:match(" [(]([^()]+)[)]$") or codename
+-- "PocketBook 615"
+codename = codename:match("^PocketBook ([^ ].*)$") or codename
+-- "PB615"
+codename = codename:match("^PB(.+)$") or codename
+
+if codename == "515" then
     return PocketBook515
-elseif codename == "PB606" or codename == "PocketBook 606" then
+elseif codename == "606" then
     return PocketBook606
-elseif codename == "PocketBook 611" then
+elseif codename == "611" then
     return PocketBook611
-elseif codename == "PocketBook 613" then
+elseif codename == "613" then
     return PocketBook613
-elseif codename == "PocketBook 614" or codename == "PocketBook 614W" then
+elseif codename == "614" or codename == "614W" then
     return PocketBook614W
-elseif codename == "PB615" or codename == "PB615W" or
-    codename == "PocketBook 615" or codename == "PocketBook 615W" then
+elseif codename == "615" or codename == "615W" then
     return PocketBook615
-elseif codename == "PB616" or codename == "PB616W" or
-    codename == "PocketBook 616" or codename == "PocketBook 616W" then
+elseif codename == "616" or codename == "616W" then
     return PocketBook616
-elseif codename == "PB617" or codename == "PocketBook 617" then
+elseif codename == "617" then
     return PocketBook617
-elseif codename == "PocketBook 622" then
+elseif codename == "618" then
+    return PocketBook618
+elseif codename == "622" then
     return PocketBook622
-elseif codename == "PocketBook 623" then
+elseif codename == "623" then
     return PocketBook623
-elseif codename == "PocketBook 624" then
+elseif codename == "624" then
     return PocketBook624
-elseif codename == "PB625" then
+elseif codename == "625" then
     return PocketBook625
-elseif codename == "PB626" or codename == "PB626(2)-TL3" or
-    codename == "PocketBook 626" then
+elseif codename == "626" or codename == "626(2)-TL3" then
     return PocketBook626
-elseif codename == "PB627" then
+elseif codename == "627" then
     return PocketBook627
-elseif codename == "PB628" then
+elseif codename == "628" then
     return PocketBook628
-elseif codename == "PocketBook 630" then
+elseif codename == "629" then
+    return PocketBook629
+elseif codename == "630" then
     return PocketBook630
-elseif codename == "PB631" or codename == "PocketBook 631" then
+elseif codename == "631" then
     return PocketBook631
-elseif codename == "PB632" then
+elseif codename == "632" then
     return PocketBook632
-elseif codename == "PB633" then
+elseif codename == "633" then
     return PocketBook633
-elseif codename == "PB640" or codename == "PocketBook 640" then
+elseif codename == "634" then
+    return PocketBook634
+elseif codename == "640" then
     return PocketBook640
-elseif codename == "PB641" then
+elseif codename == "641" then
     return PocketBook641
-elseif codename == "PB650" or codename == "PocketBook 650" then
+elseif codename == "650" then
     return PocketBook650
-elseif codename == "PB700" or codename == "PocketBook 700" then
+elseif codename == "700" then
     return PocketBook700
-elseif codename == "PB740" then
+elseif codename == "700K3" then
+    return PocketBook700K3
+elseif codename == "740" then
     return PocketBook740
-elseif codename == "PB740-2" or codename == "PB740-3" then
+elseif codename == "740-2" or codename == "740-3" then
     return PocketBook740_2
-elseif codename == "PB741" then
+elseif codename == "741" then
     return PocketBook741
-elseif codename == "PocketBook 840" then
+elseif codename == "743C" then
+    return PocketBook743C
+elseif codename == "743K3" then
+    return PocketBook743K3
+elseif codename == "743G" or codename == "743g" then
+    return PocketBook743G
+elseif codename == "840" or codename == "Reader InkPad" then
     return PocketBook840
-elseif codename == "PB970" then
+elseif codename == "970" then
     return PocketBook970
-elseif codename == "PB1040" then
+elseif codename == "1040" then
     return PocketBook1040
-elseif codename == "PocketBook Color Lux" then
+elseif codename == "Color Lux" then
     return PocketBookColorLux
 else
-    error("unrecognized PocketBook model " .. codename)
+    error("unrecognized PocketBook model " .. full_codename)
 end

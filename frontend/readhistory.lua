@@ -7,6 +7,7 @@ local util = require("util")
 local joinPath = ffiutil.joinPath
 local lfs = require("libs/libkoreader-lfs")
 local realpath = ffiutil.realpath
+local C_ = require("gettext").pgettext
 
 local history_file = joinPath(DataStorage:getDataDir(), "history.lua")
 
@@ -16,6 +17,11 @@ local ReadHistory = {
     last_read_time = 0,
 }
 
+local function getMandatory(date_time)
+    return G_reader_settings:isTrue("history_datetime_short")
+        and os.date(C_("Date string", "%y-%m-%d"), date_time) or datetime.secondsToDateTime(date_time)
+end
+
 local function buildEntry(input_time, input_file)
     local file_path = realpath(input_file) or input_file -- keep orig file path of deleted files
     local file_exists = lfs.attributes(file_path, "mode") == "file"
@@ -24,7 +30,7 @@ local function buildEntry(input_time, input_file)
         file = file_path,
         text = input_file:gsub(".*/", ""),
         dim = not file_exists,
-        mandatory = datetime.secondsToDateTime(input_time),
+        mandatory = getMandatory(input_time),
         select_enabled = file_exists,
     }
 end
@@ -85,15 +91,10 @@ function ReadHistory:_flush()
     for _, v in ipairs(self.hist) do
         table.insert(content, {
             time = v.time,
-            file = v.file
+            file = v.file,
         })
     end
-    local f = io.open(history_file, "w")
-    if f then
-        f:write("return " .. dump(content) .. "\n")
-        ffiutil.fsyncOpenedFile(f) -- force flush to the storage device
-        f:close()
-    end
+    util.writeToFile(dump(content), history_file, true, true)
     self:ensureLastFile()
 end
 
@@ -142,14 +143,10 @@ function ReadHistory:_readLegacyHistory()
     os.remove(history_dir)
 end
 
-function ReadHistory:_init()
-    self:reload()
-end
-
 function ReadHistory:ensureLastFile()
     local last_existing_file
     for _, v in ipairs(self.hist) do
-        if lfs.attributes(v.file, "mode") == "file" then
+        if v.select_enabled then
             last_existing_file = v.file
             break
         end
@@ -166,7 +163,7 @@ function ReadHistory:getPreviousFile(current_file)
     end
     for _, v in ipairs(self.hist) do
         -- skip current document and deleted items kept in history
-        if v.file ~= current_file and lfs.attributes(v.file, "mode") == "file" then
+        if v.file ~= current_file and v.select_enabled then
             return v.file
         end
     end
@@ -183,25 +180,102 @@ function ReadHistory:getFileByDirectory(directory, recursive)
     end
 end
 
-function ReadHistory:updateItemByPath(old_path, new_path)
-    local index = self:getIndexByFile(old_path)
+--- Updates the history list after renaming/moving a file.
+function ReadHistory:updateItem(file, new_filepath)
+    local index = self:getIndexByFile(file)
     if index then
-        self.hist[index].file = new_path
-        self.hist[index].text = new_path:gsub(".*/", "")
+        local item = self.hist[index]
+        item.file = new_filepath
+        item.text = new_filepath:gsub(".*/", "")
         self:_flush()
-        self:reload(true)
+    end
+end
+
+function ReadHistory:updateItems(files, new_path) -- files = { filepath = true, }
+    local history_updated
+    for file in pairs(files) do
+        local index = self:getIndexByFile(file)
+        if index then
+            local item = self.hist[index]
+            item.file = new_path .. "/" .. item.text
+            history_updated = true
+        end
+    end
+    if history_updated then
+        self:_flush()
+    end
+end
+
+--- Updates the history list after renaming/moving a folder.
+function ReadHistory:updateItemsByPath(old_path, new_path)
+    local len = #old_path
+    local history_updated
+    for i, v in ipairs(self.hist) do
+        if v.file:sub(1, len) == old_path then
+            self.hist[i].file = new_path .. v.file:sub(len + 1)
+            history_updated = true
+        end
+    end
+    if history_updated then
+        self:_flush()
     end
 end
 
 --- Updates the history list after deleting a file.
-function ReadHistory:fileDeleted(path)
-    local index = self:getIndexByFile(path)
+function ReadHistory:fileDeleted(path_or_index)
+    local index
+    local is_single = type(path_or_index) == "string"
+    if is_single then -- deleting single file, path passed
+        index = self:getIndexByFile(path_or_index)
+    else -- deleting folder, index passed
+        index = path_or_index
+    end
     if index then
         if G_reader_settings:isTrue("autoremove_deleted_items_from_history") then
-            self:removeItem(self.hist[index], index)
+            self:removeItem(self.hist[index], index, not is_single) -- flush immediately when deleting single file only
         else
             self.hist[index].dim = true
             self.hist[index].select_enabled = false
+            if is_single then
+                self:ensureLastFile()
+            end
+        end
+    end
+end
+
+--- Updates the history list after deleting a folder.
+function ReadHistory:folderDeleted(path)
+    local history_updated
+    for i = #self.hist, 1, -1 do
+        local file = self.hist[i].file
+        if util.stringStartsWith(file, path) then
+            self:fileDeleted(i)
+            history_updated = true
+            DocSettings.updateLocation(file) -- remove sdr if not in book location
+        end
+    end
+    if history_updated then
+        if G_reader_settings:isTrue("autoremove_deleted_items_from_history") then
+            self:_flush()
+        else
+            self:ensureLastFile()
+        end
+    end
+end
+
+function ReadHistory:removeItems(files) -- files = { filepath = true, }
+    local history_updated
+    for file in pairs(files) do
+        local index = self:getIndexByFile(file)
+        if index then
+            self:fileDeleted(index)
+            history_updated = true
+        end
+    end
+    if history_updated then
+        if G_reader_settings:isTrue("autoremove_deleted_items_from_history") then
+            self:_flush()
+        else
             self:ensureLastFile()
         end
     end
@@ -248,39 +322,47 @@ end
 --- Adds new item (last opened document) to the top of the history list.
 -- If item time (ts) is passed, add item to the history list at this time position.
 function ReadHistory:addItem(file, ts, no_flush)
-    if file ~= nil and lfs.attributes(file, "mode") == "file" then
-        local index = self:getIndexByFile(realpath(file))
-        if ts and index and self.hist[index].time == ts then
-            return -- this legacy item is in the history already
-        end
-        local now = ts or os.time()
-        local mtime = lfs.attributes(file, "modification")
-        lfs.touch(file, now, mtime) -- update book access time for sorting by last read date
-        if index == 1 and not ts then -- last book, update access time only
-            self.hist[1].time = now
-            self.hist[1].mandatory = datetime.secondsToDateTime(now)
-        else -- old or new book
-            if index then -- old book
-                table.remove(self.hist, index)
-            end
-            index = ts and self:getIndexByTime(ts, file:gsub(".*/", "")) or 1
-            table.insert(self.hist, index, buildEntry(now, file))
-        end
-        if not no_flush then
-            self:_reduce()
-            self:_flush()
-        end
-        return true -- used while adding legacy items
+    file = realpath(file)
+    if not file or (ts and lfs.attributes(file, "mode") ~= "file") then
+        return -- bad legacy item
     end
+    local index = self:getIndexByFile(file)
+    if ts and index and self.hist[index].time == ts then
+        return -- legacy item already added
+    end
+    local now = ts or os.time()
+    local mtime = lfs.attributes(file, "modification")
+    lfs.touch(file, now, mtime) -- update book access time for sorting by last read date
+    if index == 1 and not ts then -- last book, update access time only
+        self.hist[1].time = now
+        self.hist[1].mandatory = getMandatory(now)
+    else -- old or new book
+        if index then -- old book
+            table.remove(self.hist, index)
+        end
+        index = ts and self:getIndexByTime(ts, file:gsub(".*/", "")) or 1
+        table.insert(self.hist, index, buildEntry(now, file))
+    end
+    if not no_flush then
+        self:_reduce()
+        self:_flush()
+    end
+    return true -- used while adding legacy items
 end
 
 --- Updates last book access time on closing the document.
 function ReadHistory:updateLastBookTime(no_flush)
     local now = os.time()
     self.hist[1].time = now
-    self.hist[1].mandatory = datetime.secondsToDateTime(now)
+    self.hist[1].mandatory = getMandatory(now)
     if not no_flush then
         self:_flush()
+    end
+end
+
+function ReadHistory:updateDateTimeString()
+    for _, v in ipairs(self.hist) do
+        v.mandatory = getMandatory(v.time)
     end
 end
 
@@ -293,6 +375,10 @@ function ReadHistory:reload(force_read)
         end
         self:_reduce()
     end
+end
+
+function ReadHistory:_init()
+    self:reload()
 end
 
 ReadHistory:_init()

@@ -20,15 +20,6 @@ fi
 # Default Android build to arm.
 ANDROID_ARCH="${ANDROID_ARCH:-arm}"
 
-# Default to Android 4.0+; required for NDK 15 but with a custom NDK the strict minimum is 9.
-if [[ "${ANDROID_ARCH}" == "arm64" ]] || [[ "${ANDROID_ARCH}" == "x86_64" ]]; then
-    # 64bit arches require at least ABI 21
-    NDKABI="${NDKABI:-21}"
-else
-    NDKABI="${NDKABI:-14}"
-fi
-export NDKABI
-
 # Default android flavor
 ANDROID_FLAVOR="${ANDROID_FLAVOR:-rocks}"
 export ANDROID_FLAVOR
@@ -110,8 +101,6 @@ function setup_env() {
     SETUP_ENV_GREP_COMMAND="grep -z -v debug"
     if [ -n "${KODEBUG}" ]; then
         SETUP_ENV_GREP_COMMAND="grep -z debug"
-        # for android adb install
-        KODEBUG_SUFFIX=-debug
     fi
     local files=()
     while IFS= read -r -d $'\0'; do
@@ -126,10 +115,10 @@ function setup_env() {
         local ts=()
         # Store list of ts at the same index
         for i in "${!files[@]}"; do
-            local file="${files[${i}]}/koreader"
+            local file="${files[i]}/koreader"
             if [ -d "${file}" ]; then
                 echo "${file} (last modified on $(stat -c %y "${file}"))"
-                ts[${i}]="$(stat -c %Y "${file}")"
+                ts[i]="$(stat -c %Y "${file}")"
             fi
         done
         # Sort the list of ts
@@ -137,19 +126,16 @@ function setup_env() {
         IFS=$'\n' read -d '' -r -a sorted_ts < <(printf '%s\n' "${ts[@]}" | sort -r)
         # Find the id of the most recent ts (spoiler: it's going to be the one currently targeted by this invocation of kodev)
         for i in "${!ts[@]}"; do
-            if [ "${ts[${i}]}" == "${sorted_ts[0]}" ]; then
+            if [ "${ts[i]}" == "${sorted_ts[0]}" ]; then
                 idx="${i}"
                 break
             fi
         done
         # Recap
-        echo "Picking the most recent one: ${files[${idx}]}/koreader"
+        echo "Picking the most recent one: ${files[idx]}/koreader"
     fi
-    EMU_DIR="${files[${idx}]}/koreader"
+    EMU_DIR="${files[idx]}/koreader"
     export EMU_DIR
-    KO_LD_LIBRARY_PATH="$(realpath "${EMU_DIR}")/libs:${LD_LIBRARY_PATH}"
-    # Don't export it to avoid messing with tools (e.g., debuggers).
-    # We'll pass it to LuaJIT via env
 }
 
 function kodev-fetch-thirdparty() {
@@ -158,6 +144,7 @@ function kodev-fetch-thirdparty() {
 
 SUPPORTED_TARGETS="
     kindle          Compatible with all Kindle models >= Kindle4
+    kindlehf        Compatible with all Kindles with FW >= 5.16.3
     kindlepw2       With compiler optimizations for Kindle models >= Paperwhite 2
     kindle-legacy   Needed only for Kindle2/3/DXG
     kobo
@@ -168,10 +155,7 @@ SUPPORTED_TARGETS="
     pocketbook
     ubuntu-touch
     appimage
-    debian          Debian package for current arch
-    debian-armel    Debian package for generic armel devices
-    debian-armhf    Debian package for generic armhf devices
-    debian-arm64    Debian package for generic 64 bits arm devices
+    linux
     macos           MacOS app bundle. You need a mac to build this package
     emu             (*default) If no TARGET is given, assume emulator
     win32
@@ -245,6 +229,10 @@ ${SUPPORTED_TARGETS}"
             make TARGET=kindle
             assert_ret_zero $?
             ;;
+        kindlehf)
+            make TARGET=kindlehf
+            assert_ret_zero $?
+            ;;
         kindlepw2)
             make TARGET=kindlepw2
             assert_ret_zero $?
@@ -266,21 +254,7 @@ ${SUPPORTED_TARGETS}"
             assert_ret_zero $?
             ;;
         android)
-            if [ -z "${NDK}" ]; then
-                if [ -n "${ANDROID_NDK_HOME}" ]; then
-                    # some distributions use `ANDROID_NDK` instead, fall back to it
-                    export NDK="${ANDROID_NDK_HOME}"
-                else
-                    export NDK="${CURDIR}/base/toolchain/android-ndk-r15c"
-                fi
-            fi
-            [ -e "${CURDIR}/base/toolchain/android-toolchain-${ANDROID_ARCH}/bin/" ] || {
-                { [ -e "${NDK}" ] || make -C "${CURDIR}/base/toolchain" android-ndk; }
-                assert_ret_zero $?
-                make android-toolchain
-                assert_ret_zero $?
-            }
-            echo "Using NDK: ${NDK}..."
+            make android-ndk || exit $?
             make TARGET=android
             assert_ret_zero $?
             ;;
@@ -296,20 +270,8 @@ ${SUPPORTED_TARGETS}"
             make TARGET=appimage
             assert_ret_zero $?
             ;;
-        debian)
-            make TARGET=debian
-            assert_ret_zero $?
-            ;;
-        debian-armel)
-            make TARGET=debian-armel
-            assert_ret_zero $?
-            ;;
-        debian-armhf)
-            make TARGET=debian-armhf
-            assert_ret_zero $?
-            ;;
-        debian-arm64)
-            make TARGET=debian-arm64
+        linux)
+            make TARGET=linux
             assert_ret_zero $?
             ;;
         macos)
@@ -389,6 +351,9 @@ ${SUPPORTED_TARGETS}"
         kindle)
             make TARGET=kindle clean
             ;;
+        kindlehf)
+            make TARGET=kindlehf clean
+            ;;
         kindlepw2)
             make TARGET=kindlepw2 clean
             ;;
@@ -417,17 +382,8 @@ ${SUPPORTED_TARGETS}"
         appimage)
             make TARGET=appimage clean
             ;;
-        debian)
-            make TARGET=debian clean
-            ;;
-        debian-armel)
-            make TARGET=debian-armel clean
-            ;;
-        debian-armhf)
-            make TARGET=debian-armhf clean
-            ;;
-        debian-arm64)
-            make TARGET=debian-arm64 clean
+        linux)
+            make TARGET=linux clean
             ;;
         macos)
             is_mac
@@ -527,6 +483,10 @@ ${SUPPORTED_RELEASE_TARGETS}"
             kodev-build kindle
             make TARGET=kindle update
             ;;
+        kindlehf)
+            kodev-build kindlehf
+            make TARGET=kindlehf update
+            ;;
         kindlepw2)
             kodev-build kindlepw2
             make TARGET=kindlepw2 update
@@ -552,14 +512,8 @@ ${SUPPORTED_RELEASE_TARGETS}"
             make TARGET=kindle-legacy update
             ;;
         android)
+            make android-sdk || exit $?
             kodev-build android
-            export PATH=${PATH}:${CURDIR}/base/toolchain/android-sdk-linux/tools
-            command -v android &>/dev/null || {
-                make -C "${CURDIR}/base/toolchain" android-sdk
-            }
-            ANDROID_HOME=$(dirname "$(dirname "$(command -v android)")")
-            export ANDROID_HOME
-            export PATH="${PATH}:${NDK}"
             make TARGET=android update
             ;;
         pocketbook)
@@ -574,21 +528,9 @@ ${SUPPORTED_RELEASE_TARGETS}"
             kodev-build appimage
             make TARGET=appimage update
             ;;
-        debian)
-            kodev-build debian
-            make TARGET=debian update
-            ;;
-        debian-armel)
-            kodev-build debian-armel
-            make TARGET=debian-armel update
-            ;;
-        debian-armhf)
-            kodev-build debian-armhf
-            make TARGET=debian-armhf update
-            ;;
-        debian-arm64)
-            kodev-build debian-arm64
-            make TARGET=debian-arm64 update
+        linux)
+            kodev-build linux
+            make TARGET=linux update
             ;;
         macos)
             is_mac
@@ -811,18 +753,20 @@ TARGET:
                     kodev-release --ignore-translation android
                     assert_ret_zero $?
                 fi
-                setup_env
+                if [ -n "${KODEBUG}" ]; then
+                    KODEBUG_SUFFIX=-debug
+                fi
                 # clear logcat to get rid of useless cruft
                 adb logcat -c
                 # uninstall existing package to make sure *everything* is gone from memory
                 # no assert_ret_zero; uninstall is allowed to fail if there's nothing to uninstall
-                adb uninstall "org.koreader.launcher"
+                adb uninstall "org.koreader.launcher${KODEBUG_SUFFIX/-/.}"
                 adb install "koreader-android-${ANDROID_ARCH}${KODEBUG_SUFFIX}-${VERSION}.apk"
                 assert_ret_zero $?
                 # there's no adb run so we do this…
-                adb shell monkey -p org.koreader.launcher -c android.intent.category.LAUNCHER 1
+                adb shell monkey -p "org.koreader.launcher${KODEBUG_SUFFIX/-/.}" -c android.intent.category.LAUNCHER 1
                 assert_ret_zero $?
-                adb logcat KOReader:V luajit-launcher:V "*:E"
+                adb logcat KOReader:V k2pdfopt:V luajit-launcher:V dlopen:V "*:E"
             } || echo "Failed to find adb in PATH to interact with Android device."
             ;;
         *)
@@ -847,7 +791,7 @@ TARGET:
             fi
 
             KOREADER_ARGS="-d"
-            KOREADER_COMMAND="env LD_LIBRARY_PATH=${KO_LD_LIBRARY_PATH} ./reader.lua ${KOREADER_ARGS}"
+            KOREADER_COMMAND="./reader.lua ${KOREADER_ARGS}"
 
             # run with catchsegv by default when it is available (unless no-catchsegv is enabled, c.f., #7036)
             # see https://github.com/koreader/koreader/issues/2878#issuecomment-326796777
@@ -858,7 +802,7 @@ TARGET:
             fi
 
             if [ -n "${valgrind}" ]; then
-                KOREADER_COMMAND="${valgrind} env LD_LIBRARY_PATH=${KO_LD_LIBRARY_PATH} ./luajit reader.lua ${KOREADER_ARGS}"
+                KOREADER_COMMAND="${valgrind} ./luajit reader.lua ${KOREADER_ARGS}"
             fi
 
             echo "[*] Running KOReader with arguments: $* ..."
@@ -872,9 +816,9 @@ TARGET:
                     # We don't want to stack valgrind/catchsegv on top of GDB ;).
                     if [[ "${gdb}" == gdb* ]]; then
                         # The standard CLI needs a little hand holding to properly pass arguments to the process it'll monitor
-                        KOREADER_COMMAND="${gdb} --args env LD_LIBRARY_PATH=${KO_LD_LIBRARY_PATH} ./luajit reader.lua ${KOREADER_ARGS} ${args}"
+                        KOREADER_COMMAND="${gdb} --directory "${CURDIR}/base" --args ./luajit reader.lua ${KOREADER_ARGS} ${args}"
                     else
-                        KOREADER_COMMAND="${gdb} env LD_LIBRARY_PATH=${KO_LD_LIBRARY_PATH} ./luajit reader.lua ${KOREADER_ARGS} ${args}"
+                        KOREADER_COMMAND="${gdb} ./luajit reader.lua ${KOREADER_ARGS} ${args}"
                     fi
                 else
                     KOREADER_COMMAND="${KOREADER_COMMAND} ${args}"
@@ -893,7 +837,7 @@ TARGET:
                 capture_ctrl_c
             fi
 
-            exit ${RETURN_VALUE}
+            exit "${RETURN_VALUE}"
             ;;
     esac
 }
@@ -981,8 +925,7 @@ OPTIONS:
         fi
 
         echo "Running tests in" "${test_path}"
-        env LD_LIBRARY_PATH="${KO_LD_LIBRARY_PATH}" \
-            busted --lua="./luajit" "${opts}" \
+        busted --lua="./luajit" "${opts}" \
             --output=gtest \
             --lpath="${test_path_basedir}/?.lua" \
             --exclude-tags=notest "${test_path}"
@@ -1120,8 +1063,7 @@ OPTIONS:
         test_path="./spec/${target}/unit"
         if [ "${show_previous}" -eq 0 ]; then
             echo "Running tests in" ${test_path}
-            env LD_LIBRARY_PATH="${KO_LD_LIBRARY_PATH}" \
-                busted --lua="./luajit" \
+            busted --lua="./luajit" \
                 --sort-files \
                 -o "./spec/${target}/unit/verbose_print" \
                 --coverage \
@@ -1207,7 +1149,7 @@ TARGET:
                 fi
             else
                 if [ -n "${KODEBUG}" ]; then
-                    adb logcat 'KOReader:V ApkUpdater:V Assets:V Device:V dlopen:V EPD:V EventReceiver:V Lights:V LuaJIT:V MainActivity:V NativeGlue:V NativeThread:V Timeout:V ActivityManager:V AndroidRuntime:V DEBUG:* *:F'
+                    adb logcat 'KOReader:V ApkUpdater:V Assets:V Device:V dlopen:V EPD:V EventReceiver:V Lights:V Surface:V LuaJIT:V MainActivity:V NativeGlue:V NativeThread:V Timeout:V ActivityManager:V AndroidRuntime:V DEBUG:* *:F'
                 else
                     adb logcat 'KOReader:I MainActivity:V NativeGlue:V NativeThread:V ActivityManager:W AndroidRuntime:E DEBUG:* *:F'
                 fi
@@ -1289,8 +1231,7 @@ case "${1}" in
     prompt)
         kodev-build
         pushd "${EMU_DIR}" && {
-            env LD_LIBRARY_PATH="${KO_LD_LIBRARY_PATH}" \
-                ./luajit -i setupkoenv.lua
+            ./luajit -i setupkoenv.lua
         } && popd || exit
         ;;
     log)

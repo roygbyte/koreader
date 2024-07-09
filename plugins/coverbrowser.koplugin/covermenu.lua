@@ -1,10 +1,8 @@
-local BD = require("ui/bidi")
+local ButtonDialog = require("ui/widget/buttondialog")
 local DocSettings = require("docsettings")
-local FileManagerBookInfo = require("apps/filemanager/filemanagerbookinfo")
 local InfoMessage = require("ui/widget/infomessage")
 local Menu = require("ui/widget/menu")
 local UIManager = require("ui/uimanager")
-local filemanagerutil = require("apps/filemanager/filemanagerutil")
 local logger = require("logger")
 local _ = require("gettext")
 
@@ -40,8 +38,6 @@ local nb_drawings_since_last_collectgarbage = 0
 -- in the real Menu class or instance
 local CoverMenu = {}
 
-local book_statuses = {"reading", "abandoned", "complete"}
-
 function CoverMenu:updateCache(file, status, do_create, pages)
     if do_create then -- create new cache entry if absent
         if self.cover_info_cache[file] then return end
@@ -59,8 +55,14 @@ function CoverMenu:updateCache(file, status, do_create, pages)
         local percent_finished = doc_settings:readSetting("percent_finished")
         local summary = doc_settings:readSetting("summary")
         status = summary and summary.status
-        local highlight = doc_settings:readSetting("highlight")
-        local has_highlight = highlight and next(highlight) and true
+        local has_highlight
+        local annotations = doc_settings:readSetting("annotations")
+        if annotations then
+            has_highlight = #annotations > 0
+        else
+            local highlight = doc_settings:readSetting("highlight")
+            has_highlight = highlight and next(highlight) and true
+        end
         self.cover_info_cache[file] = table.pack(pages, percent_finished, status, has_highlight) -- may be a sparse array
     else
         if self.cover_info_cache and self.cover_info_cache[file] then
@@ -73,7 +75,7 @@ function CoverMenu:updateCache(file, status, do_create, pages)
     end
 end
 
-function CoverMenu:updateItems(select_number)
+function CoverMenu:updateItems(select_number, no_recalculate_dimen)
     -- As done in Menu:updateItems()
     local old_dimen = self.dimen and self.dimen:copy()
     -- self.layout must be updated for focusmanager
@@ -83,7 +85,9 @@ function CoverMenu:updateItems(select_number)
     --       on the rest of the widget elements being properly laid-out,
     --       so we have to run it *first*, unlike in Menu.
     --       Otherwise, various layout issues arise (e.g., MosaicMenu's page_info is misaligned).
-    self:_recalculateDimen()
+    if not no_recalculate_dimen then
+        self:_recalculateDimen()
+    end
     self.page_info:resetLayout()
     self.return_button:resetLayout()
     self.content_group:resetLayout()
@@ -141,9 +145,6 @@ function CoverMenu:updateItems(select_number)
     -- As done in Menu:updateItems()
     self:updatePageInfo(select_number)
 
-    if self.show_path then
-        self.title_bar:setSubTitle(BD.directory(filemanagerutil.abbreviate(self.path)))
-    end
     self.show_parent.dithered = self._has_cover_images
     UIManager:setDirty(self.show_parent, function()
         local refresh_dimen =
@@ -234,8 +235,9 @@ function CoverMenu:updateItems(select_number)
     -- we replace it by ours.
     -- (FileManager may replace file_chooser.showFileDialog after we've been called once, so we need
     -- to replace it again if it is not ours)
-    if not self.showFileDialog_ours -- never replaced
-            or self.showFileDialog ~= self.showFileDialog_ours then -- it is no more ours
+    if self.path -- FileManager only
+        and (not self.showFileDialog_ours -- never replaced
+              or self.showFileDialog ~= self.showFileDialog_ours) then -- it is no more ours
         -- We need to do it at nextTick, once FileManager has instantiated
         -- its FileChooser completely
         UIManager:nextTick(function()
@@ -245,22 +247,23 @@ function CoverMenu:updateItems(select_number)
             -- Replace it with ours
             -- This causes luacheck warning: "shadowing upvalue argument 'self' on line 34".
             -- Ignoring it (as done in filemanager.lua for the same showFileDialog)
-            self.showFileDialog = function(self, file) -- luacheck: ignore
-                -- Call original function: it will create a ButtonDialogTitle
+            self.showFileDialog = function(self, item) -- luacheck: ignore
+                local file = item.path
+                -- Call original function: it will create a ButtonDialog
                 -- and store it as self.file_dialog, and UIManager:show() it.
-                self.showFileDialog_orig(self, file)
+                self.showFileDialog_orig(self, item)
 
-                local bookinfo = BookInfoManager:getBookInfo(file)
+                local bookinfo = self.book_props -- getBookInfo(file) called by FileManager
                 if not bookinfo or bookinfo._is_directory then
                     -- If no bookinfo (yet) about this file, or it's a directory, let the original dialog be
                     return true
                 end
 
-                -- Remember some of this original ButtonDialogTitle properties
+                -- Remember some of this original ButtonDialog properties
                 local orig_title = self.file_dialog.title
                 local orig_title_align = self.file_dialog.title_align
                 local orig_buttons = self.file_dialog.buttons
-                -- Close original ButtonDialogTitle (it has not yet been painted
+                -- Close original ButtonDialog (it has not yet been painted
                 -- on screen, so we won't see it)
                 UIManager:close(self.file_dialog)
                 -- And clear the rendering stack to avoid inheriting its dirty/refresh queue
@@ -276,7 +279,7 @@ function CoverMenu:updateItems(select_number)
                                 ["ignore_cover"] = not bookinfo.ignore_cover and 'Y' or false,
                             })
                             UIManager:close(self.file_dialog)
-                            self:updateItems()
+                            self:updateItems(1, true)
                         end,
                     },
                     { -- Allow user to ignore some bad metadata (filename will be used instead)
@@ -287,78 +290,29 @@ function CoverMenu:updateItems(select_number)
                                 ["ignore_meta"] = not bookinfo.ignore_meta and 'Y' or false,
                             })
                             UIManager:close(self.file_dialog)
-                            self:updateItems()
+                            self:updateItems(1, true)
                         end,
                     },
                 })
                 table.insert(orig_buttons, {
                     { -- Allow a new extraction (multiple interruptions, book replaced)...
                         text = _("Refresh cached book information"),
-                        enabled = bookinfo and true or false,
                         callback = function()
                             -- Wipe the cache
                             self:updateCache(file)
                             BookInfoManager:deleteBookInfo(file)
                             UIManager:close(self.file_dialog)
-                            self:updateItems()
+                            self:updateItems(1, true)
                         end,
                     },
                 })
 
-                -- Create the new ButtonDialogTitle, and let UIManager show it
-                -- (all button callback fudging must be done after this block to stick)
-                local ButtonDialogTitle = require("ui/widget/buttondialogtitle")
-                self.file_dialog = ButtonDialogTitle:new{
+                -- Create the new ButtonDialog, and let UIManager show it
+                self.file_dialog = ButtonDialog:new{
                     title = orig_title,
                     title_align = orig_title_align,
                     buttons = orig_buttons,
                 }
-
-                -- Fudge the "Reset settings" button callback to also trash the cover_info_cache
-                local button = self.file_dialog.button_table:getButtonById("reset")
-                local orig_purge_callback = button.callback
-                button.callback = function()
-                    -- Wipe the cache
-                    self:updateCache(file)
-                    -- And then purge the sidecar folder as expected
-                    orig_purge_callback()
-                end
-
-                -- Fudge the status change button callbacks to also update the cover_info_cache
-                for _, status in ipairs(book_statuses) do
-                    button = self.file_dialog.button_table:getButtonById(status)
-                    if not button then break end -- status buttons are not shown
-                    local orig_status_callback = button.callback
-                    button.callback = function()
-                        -- Update the cache
-                        self:updateCache(file, status)
-                        -- And then set the status on file as expected
-                        orig_status_callback()
-                    end
-                end
-
-                -- Replace the "Book information" button callback to use directly our bookinfo
-                button = self.file_dialog.button_table:getButtonById("book_information")
-                button.callback = function()
-                    FileManagerBookInfo:show(file, bookinfo)
-                    UIManager:close(self.file_dialog)
-                end
-
-                button = self.file_dialog.button_table:getButtonById("book_cover")
-                if not bookinfo.has_cover then
-                    button:disable()
-                end
-
-                button = self.file_dialog.button_table:getButtonById("book_description")
-                if bookinfo.description then
-                    button.callback = function()
-                        UIManager:close(self.file_dialog)
-                        FileManagerBookInfo:onShowBookDescription(bookinfo.description)
-                    end
-                else
-                    button:disable()
-                end
-
                 UIManager:show(self.file_dialog)
                 return true
             end
@@ -378,13 +332,13 @@ function CoverMenu:onHistoryMenuHold(item)
     self.onMenuHold_orig(self, item)
     local file = item.file
 
-    local bookinfo = BookInfoManager:getBookInfo(file)
+    local bookinfo = self.book_props -- getBookInfo(file) called by FileManagerHistory
     if not bookinfo then
         -- If no bookinfo (yet) about this file, let the original dialog be
         return true
     end
 
-    -- Remember some of this original ButtonDialogTitle properties
+    -- Remember some of this original ButtonDialog properties
     local orig_title = self.histfile_dialog.title
     local orig_title_align = self.histfile_dialog.title_align
     local orig_buttons = self.histfile_dialog.buttons
@@ -403,7 +357,7 @@ function CoverMenu:onHistoryMenuHold(item)
                     ["ignore_cover"] = not bookinfo.ignore_cover and 'Y' or false,
                 })
                 UIManager:close(self.histfile_dialog)
-                self:updateItems()
+                self:updateItems(1, true)
             end,
         },
         { -- Allow user to ignore some bad metadata (filename will be used instead)
@@ -414,81 +368,29 @@ function CoverMenu:onHistoryMenuHold(item)
                     ["ignore_meta"] = not bookinfo.ignore_meta and 'Y' or false,
                 })
                 UIManager:close(self.histfile_dialog)
-                self:updateItems()
+                self:updateItems(1, true)
             end,
         },
     })
     table.insert(orig_buttons, {
         { -- Allow a new extraction (multiple interruptions, book replaced)...
             text = _("Refresh cached book information"),
-            enabled = bookinfo and true or false,
             callback = function()
                 -- Wipe the cache
                 self:updateCache(file)
                 BookInfoManager:deleteBookInfo(file)
                 UIManager:close(self.histfile_dialog)
-                self:updateItems()
+                self:updateItems(1, true)
             end,
         },
     })
 
     -- Create the new ButtonDialog, and let UIManager show it
-    -- (all button callback replacement must be done after this block to stick)
-    local ButtonDialogTitle = require("ui/widget/buttondialogtitle")
-    self.histfile_dialog = ButtonDialogTitle:new{
+    self.histfile_dialog = ButtonDialog:new{
         title = orig_title,
         title_align = orig_title_align,
         buttons = orig_buttons,
     }
-
-    -- Fudge the "Reset settings" button callback to also trash the cover_info_cache
-    local button = self.histfile_dialog.button_table:getButtonById("reset")
-    local orig_purge_callback = button.callback
-    button.callback = function()
-        -- Wipe the cache
-        self:updateCache(file)
-        -- And then purge the sidecar folder as expected
-        orig_purge_callback()
-    end
-
-    -- Fudge the status change button callbacks to also update the cover_info_cache
-    for _, status in ipairs(book_statuses) do
-        button = self.histfile_dialog.button_table:getButtonById(status)
-        if not button then break end -- status buttons are not shown
-        local orig_status_callback = button.callback
-        button.callback = function()
-            -- Update the cache
-            self:updateCache(file, status)
-            -- And then set the status on file as expected
-            orig_status_callback()
-        end
-    end
-
-    -- Replace the "Book information" button callback to use directly our bookinfo
-    button = self.histfile_dialog.button_table:getButtonById("book_information")
-    local function when_updated_callback()
-        self:updateItems()
-    end
-    button.callback = function()
-        FileManagerBookInfo:show(file, bookinfo, when_updated_callback)
-        UIManager:close(self.histfile_dialog)
-    end
-
-    button = self.histfile_dialog.button_table:getButtonById("book_cover")
-    if not bookinfo.has_cover then
-        button:disable()
-    end
-
-    button = self.histfile_dialog.button_table:getButtonById("book_description")
-    if bookinfo.description then
-        button.callback = function()
-            UIManager:close(self.histfile_dialog)
-            FileManagerBookInfo:onShowBookDescription(bookinfo.description)
-        end
-    else
-        button:disable()
-    end
-
     UIManager:show(self.histfile_dialog)
     return true
 end
@@ -501,13 +403,13 @@ function CoverMenu:onCollectionsMenuHold(item)
     self.onMenuHold_orig(self, item)
     local file = item.file
 
-    local bookinfo = BookInfoManager:getBookInfo(file)
+    local bookinfo = self.book_props -- getBookInfo(file) called by FileManagerCollection
     if not bookinfo then
         -- If no bookinfo (yet) about this file, let the original dialog be
         return true
     end
 
-    -- Remember some of this original ButtonDialogTitle properties
+    -- Remember some of this original ButtonDialog properties
     local orig_title = self.collfile_dialog.title
     local orig_title_align = self.collfile_dialog.title_align
     local orig_buttons = self.collfile_dialog.buttons
@@ -526,7 +428,7 @@ function CoverMenu:onCollectionsMenuHold(item)
                     ["ignore_cover"] = not bookinfo.ignore_cover and 'Y' or false,
                 })
                 UIManager:close(self.collfile_dialog)
-                self:updateItems()
+                self:updateItems(1, true)
             end,
         },
         { -- Allow user to ignore some bad metadata (filename will be used instead)
@@ -537,81 +439,29 @@ function CoverMenu:onCollectionsMenuHold(item)
                     ["ignore_meta"] = not bookinfo.ignore_meta and 'Y' or false,
                 })
                 UIManager:close(self.collfile_dialog)
-                self:updateItems()
+                self:updateItems(1, true)
             end,
         },
     })
     table.insert(orig_buttons, {
         { -- Allow a new extraction (multiple interruptions, book replaced)...
             text = _("Refresh cached book information"),
-            enabled = bookinfo and true or false,
             callback = function()
                 -- Wipe the cache
                 self:updateCache(file)
                 BookInfoManager:deleteBookInfo(file)
                 UIManager:close(self.collfile_dialog)
-                self:updateItems()
+                self:updateItems(1, true)
             end,
         },
     })
 
     -- Create the new ButtonDialog, and let UIManager show it
-    -- (all button callback replacement must be done after this block to stick)
-    local ButtonDialogTitle = require("ui/widget/buttondialogtitle")
-    self.collfile_dialog = ButtonDialogTitle:new{
+    self.collfile_dialog = ButtonDialog:new{
         title = orig_title,
         title_align = orig_title_align,
         buttons = orig_buttons,
     }
-
-    -- Fudge the "Reset settings" button callback to also trash the cover_info_cache
-    local button = self.collfile_dialog.button_table:getButtonById("reset")
-    local orig_purge_callback = button.callback
-    button.callback = function()
-        -- Wipe the cache
-        self:updateCache(file)
-        -- And then purge the sidecar folder as expected
-        orig_purge_callback()
-    end
-
-    -- Fudge the status change button callbacks to also update the cover_info_cache
-    for _, status in ipairs(book_statuses) do
-        button = self.collfile_dialog.button_table:getButtonById(status)
-        if not button then break end -- status buttons are not shown
-        local orig_status_callback = button.callback
-        button.callback = function()
-            -- Update the cache
-            self:updateCache(file, status)
-            -- And then set the status on file as expected
-            orig_status_callback()
-        end
-    end
-
-    -- Replace the "Book information" button callback to use directly our bookinfo
-    button = self.collfile_dialog.button_table:getButtonById("book_information")
-    local function when_updated_callback()
-        self:updateItems()
-    end
-    button.callback = function()
-        FileManagerBookInfo:show(file, bookinfo, when_updated_callback)
-        UIManager:close(self.collfile_dialog)
-    end
-
-    button = self.collfile_dialog.button_table:getButtonById("book_cover")
-    if not bookinfo.has_cover then
-        button:disable()
-    end
-
-    button = self.collfile_dialog.button_table:getButtonById("book_description")
-    if bookinfo.description then
-        button.callback = function()
-            UIManager:close(self.collfile_dialog)
-            FileManagerBookInfo:onShowBookDescription(bookinfo.description)
-        end
-    else
-        button:disable()
-    end
-
     UIManager:show(self.collfile_dialog)
     return true
 end
@@ -657,16 +507,16 @@ function CoverMenu:onCloseWidget()
 end
 
 function CoverMenu:tapPlus()
-    -- Call original function: it will create a ButtonDialogTitle
+    -- Call original function: it will create a ButtonDialog
     -- and store it as self.file_dialog, and UIManager:show() it.
     CoverMenu._FileManager_tapPlus_orig(self)
     if self.file_dialog.select_mode then return end -- do not change select menu
 
-    -- Remember some of this original ButtonDialogTitle properties
+    -- Remember some of this original ButtonDialog properties
     local orig_title = self.file_dialog.title
     local orig_title_align = self.file_dialog.title_align
     local orig_buttons = self.file_dialog.buttons
-    -- Close original ButtonDialogTitle (it has not yet been painted
+    -- Close original ButtonDialog (it has not yet been painted
     -- on screen, so we won't see it)
     UIManager:close(self.file_dialog)
     UIManager:clearRenderStack()
@@ -686,9 +536,8 @@ function CoverMenu:tapPlus()
         },
     })
 
-    -- Create the new ButtonDialogTitle, and let UIManager show it
-    local ButtonDialogTitle = require("ui/widget/buttondialogtitle")
-    self.file_dialog = ButtonDialogTitle:new{
+    -- Create the new ButtonDialog, and let UIManager show it
+    self.file_dialog = ButtonDialog:new{
         title = orig_title,
         title_align = orig_title_align,
         buttons = orig_buttons,

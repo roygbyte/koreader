@@ -51,23 +51,6 @@ function DjvuDocument:updateColorRendering()
     end
 end
 
-function DjvuDocument:getProps()
-    local props = self._document:getMetadata()
-    local _, _, docname = self.file:find(".*/(.*)")
-    docname = docname or self.file
-
-    -- According to djvused(1), the convention is that
-    -- BibTex keys are always lowercase and DocInfo capitalized
-    props.title = props.title or props.Title or docname:match("(.*)%.")
-    props.authors = props.author or props.Author
-    props.series = props.series or props.Series
-    props.language = props.language or props.Language
-    props.keywords = props.keywords or props.Keywords
-    props.description = props.description or props.Description
-
-    return props
-end
-
 function DjvuDocument:comparePositions(pos1, pos2)
     return self.koptinterface:comparePositions(self, pos1, pos2)
 end
@@ -140,8 +123,12 @@ function DjvuDocument:getCoverPageImage()
     return self.koptinterface:getCoverPageImage(self)
 end
 
-function DjvuDocument:findText(pattern, origin, reverse, caseInsensitive, page)
-    return self.koptinterface:findText(self, pattern, origin, reverse, caseInsensitive, page)
+function DjvuDocument:findText(pattern, origin, reverse, case_insensitive, page)
+    return self.koptinterface:findText(self, pattern, origin, reverse, case_insensitive, page)
+end
+
+function DjvuDocument:findAllText(pattern, case_insensitive, nb_context_words, max_hits)
+    return self.koptinterface:findAllText(self, pattern, case_insensitive, nb_context_words, max_hits)
 end
 
 function DjvuDocument:renderPage(pageno, rect, zoom, rotation, gamma, render_mode, hinting)

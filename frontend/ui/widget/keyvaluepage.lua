@@ -194,7 +194,7 @@ function KeyValueItem:init()
         HorizontalGroup:new{
             dimen = content_dimen,
             LeftContainer:new{
-                dimen = {
+                dimen = Geom:new{
                     w = key_w,
                     h = content_dimen.h
                 },
@@ -268,7 +268,6 @@ function KeyValueItem:onShowKeyValue()
         title = self.key,
         title_multilines = true, -- in case it's key/title that is too long
         text = self.value,
-        text_face = Font:getFace("x_smallinfofont", self.font_size),
         lang = self.value_lang,
         width = self.textviewer_width,
         height = self.textviewer_height,
@@ -399,11 +398,10 @@ function KeyValuePage:init()
         text = "",
         hold_input = {
             title = _("Enter page number"),
-            type = "number",
+            input_type = "number",
             hint_func = function()
-                return "(" .. "1 - " .. self.pages .. ")"
+                return string.format("(1 - %s)", self.pages)
             end,
-            deny_blank_input = true,
             callback = function(input)
                 local page = tonumber(input)
                 if page and page >= 1 and page <= self.pages then
@@ -468,14 +466,10 @@ function KeyValuePage:init()
                          - 2*Size.line.thick
                             -- account for possibly 2 separator lines added
 
-    local force_items_per_page
-    if self.single_page then
-        force_items_per_page = math.max(#self.kv_pairs,
-            G_reader_settings:readSetting("keyvalues_per_page") or self:getDefaultKeyValuesPerPage())
+    self.items_per_page = G_reader_settings:readSetting("keyvalues_per_page") or self.getDefaultItemsPerPage()
+    if self.single_page and self.items_per_page < #self.kv_pairs then
+        self.items_per_page = #self.kv_pairs
     end
-
-    self.items_per_page = force_items_per_page or
-        G_reader_settings:readSetting("keyvalues_per_page") or self:getDefaultKeyValuesPerPage()
     self.item_height = math.floor(available_height / self.items_per_page)
     -- Put half of the pixels lost by floor'ing between title and content
     local content_height = self.items_per_page * self.item_height
@@ -523,7 +517,7 @@ function KeyValuePage:init()
     }
 end
 
-function KeyValuePage:getDefaultKeyValuesPerPage()
+function KeyValuePage.getDefaultItemsPerPage()
     -- Get a default according to Screen DPI (roughly following
     -- the former implementation building logic)
     local default_item_height = Size.item.height_default * 1.5 -- we were adding 1/2 as margin
@@ -686,7 +680,7 @@ function KeyValuePage:_populateItems()
                     background = Blitbuffer.COLOR_LIGHT_GRAY,
                     dimen = Geom:new{
                         w = self.item_width,
-                        h = Size.line.thick
+                        h = Size.line.thick,
                     },
                     style = "solid",
                 })
@@ -700,7 +694,7 @@ function KeyValuePage:_populateItems()
                     background = Blitbuffer.COLOR_LIGHT_GRAY,
                     dimen = Geom:new{
                         w = self.item_width,
-                        h = Size.line.thick
+                        h = Size.line.thick,
                     },
                     style = "solid",
                 })

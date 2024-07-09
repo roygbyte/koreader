@@ -5,13 +5,10 @@ This module contains miscellaneous helper functions for the KOReader frontend.
 local BaseUtil = require("ffi/util")
 local Utf8Proc = require("ffi/utf8proc")
 local lfs = require("libs/libkoreader-lfs")
-local logger = require("logger")
+local md5 = require("ffi/sha2").md5
 local _ = require("gettext")
 local C_ = _.pgettext
 local T = BaseUtil.template
-local ffi = require("ffi")
-local C = ffi.C
-require("ffi/posix_h")
 
 local lshift = bit.lshift
 local rshift = bit.rshift
@@ -56,6 +53,23 @@ function util.trim(s)
    local from = s:match"^%s*()"
    return from > #s and "" or s:match(".*%S", from)
 end
+
+--[[
+-- Trim leading & trailing character `c` from string `s`
+function util.trim_char(s, c)
+    local from = s:match"^"..c.."*()"
+    return from > #s and "" or s:match(".*[^"..c.."]", from)
+end
+
+-- Trim trailing character `c` from string `s`
+function util.rtrim_char(s, c)
+    local n = #s
+    while n > 0 and s:find("^"..c, n) do
+        n = n - 1
+    end
+    return s:sub(1, n)
+end
+--]]
 
 --[[--
 Splits a string by a pattern
@@ -761,6 +775,11 @@ function util.pathExists(path)
     return lfs.attributes(path, "mode") ~= nil
 end
 
+--- Checks if the given directory exists.
+function util.directoryExists(path)
+  return lfs.attributes(path, "mode") == "directory"
+end
+
 --- As `mkdir -p`.
 -- Unlike [lfs.mkdir](https://keplerproject.github.io/luafilesystem/manual.html#mkdir)(),
 -- does not error if the directory already exists, and creates intermediate directories as needed.
@@ -833,33 +852,13 @@ function util.removeFile(file)
     end
 end
 
-function util.writeToSysfs(val, file)
-    -- NOTE: We do things by hand via ffi, because io.write uses fwrite,
-    --       which isn't a great fit for procfs/sysfs (e.g., we lose failure cases like EBUSY,
-    --       as it only reports failures to write to the *stream*, not to the disk/file!).
-    local fd = C.open(file, bit.bor(C.O_WRONLY, C.O_CLOEXEC)) -- procfs/sysfs, we shouldn't need O_TRUNC
-    if fd == -1 then
-        logger.err("Cannot open file `" .. file .. "`:", ffi.string(C.strerror(ffi.errno())))
-        return
-    end
-    val = tostring(val)
-    local bytes = #val
-    local nw = C.write(fd, val, bytes)
-    if nw == -1 then
-        logger.err("Cannot write `" .. val .. "` to file `" .. file .. "`:", ffi.string(C.strerror(ffi.errno())))
-    end
-    C.close(fd)
-    -- NOTE: Allows the caller to possibly handle short writes (not that these should ever happen here).
-    return nw == bytes
-end
-
 -- Gets total, used and available bytes for the mountpoint that holds a given directory.
 -- @string path of the directory
 -- @treturn table with total, used and available bytes
 function util.diskUsage(dir)
     -- safe way of testing df & awk
     local function doCommand(d)
-        local handle = io.popen("df -k " .. d .. " 2>&1 | awk '$3 ~ /[0-9]+/ { print $2,$3,$4 }' 2>&1 || echo ::ERROR::")
+        local handle = io.popen("df -k " .. d .. " 2>/dev/null | awk '$3 ~ /[0-9]+/ { print $2,$3,$4 }' 2>/dev/null || echo ::ERROR::")
         if not handle then return end
         local output = handle:read("*all")
         handle:close()
@@ -1029,6 +1028,55 @@ function util.getFormattedSize(size)
     return s
 end
 
+--- Calculate partial digest of an open file. To the calculating mechanism itself,
+-- since only PDF documents could be modified by KOReader by appending data
+-- at the end of the files when highlighting, we use a non-even sampling
+-- algorithm which samples with larger weight at file head and much smaller
+-- weight at file tail, thus reduces the probability that appended data may change
+-- the digest value.
+-- Note that if PDF file size is around 1024, 4096, 16384, 65536, 262144
+-- 1048576, 4194304, 16777216, 67108864, 268435456 or 1073741824, appending data
+-- by highlighting in KOReader may change the digest value.
+function util.partialMD5(filepath)
+    if not filepath then return end
+    local file = io.open(filepath, "rb")
+    if not file then return end
+    local step, size = 1024, 1024
+    local update = md5()
+    for i = -1, 10 do
+        file:seek("set", lshift(step, 2*i))
+        local sample = file:read(size)
+        if sample then
+            update(sample)
+        else
+            break
+        end
+    end
+    file:close()
+    return update()
+end
+
+function util.writeToFile(data, filepath, force_flush, lua_dofile_ready, directory_updated)
+    if not filepath then return end
+    if lua_dofile_ready then
+        local t = { "-- ", filepath, "\nreturn ", data, "\n" }
+        data = table.concat(t)
+    end
+    local file, err = io.open(filepath, "wb")
+    if not file then
+        return nil, err
+    end
+    file:write(data)
+    if force_flush then
+        BaseUtil.fsyncOpenedFile(file)
+    end
+    file:close()
+    if directory_updated then
+        BaseUtil.fsyncDirectory(filepath)
+    end
+    return true
+end
+
 --[[--
 Replaces invalid UTF-8 characters with a replacement string.
 
@@ -1116,8 +1164,13 @@ local HTML_ENTITIES_TO_UTF8 = {
     {"&lt;", "<"},
     {"&gt;", ">"},
     {"&quot;", '"'},
+    {"&lsquo;", '‘'},
+    {"&rsquo;", '’'},
+    {"&ldquo;", '“'},
+    {"&rdquo;", '”'},
+    {"&mdash;", '—'},
     {"&apos;", "'"},
-    {"&nbsp;", "\xC2\xA0"},
+    {"&nbsp;", "\u{00A0}"},
     {"&#(%d+);", function(x) return util.unicodeCodepointToUtf8(tonumber(x)) end},
     {"&#x(%x+);", function(x) return util.unicodeCodepointToUtf8(tonumber(x, 16)) end},
     {"&amp;", "&"}, -- must be last
@@ -1229,25 +1282,61 @@ end
 --- @treturn string the CSS prettified
 function util.prettifyCSS(css_text, condensed)
     if not condensed then
-        -- Get rid of \t so we can use it as a replacement/hiding char
+        -- Get rid of \t
         css_text = css_text:gsub("\t", " ")
-        -- Wrap and indent declarations
-        css_text = css_text:gsub("%s*{%s*", " {\n    ")
-        css_text = css_text:gsub(";%s*}%s*", ";\n}\n")
-        css_text = css_text:gsub(";%s*([^}])", ";\n    %1")
-        css_text = css_text:gsub("%s*}%s*", "\n}\n")
-        -- Cleanup declarations
-        css_text = css_text:gsub("{[^}]*}", function(s)
-            s = s:gsub("%s*:%s*", ": ")
-            -- Temporarily hide/replace ',' in declaration so they
-            -- are not matched and made multi-lines by followup gsub
-            s = s:gsub("%s*,%s*", "\t")
+        css_text = css_text:gsub("\r", "")
+        -- Protect ',:;' in comments by replacing them with rare control chars
+        css_text = css_text:gsub("/%*.-%*/", function(s)
+            s = s:gsub(",", "\v")
+            s = s:gsub(":", "\f")
+            s = s:gsub(";", "\b")
             return s
+        end)
+        -- Protect ',' inside () (ie. ":is(td, th)") by replacing them with rare control chars
+        css_text = css_text:gsub("%b()/", function(s)
+            s = s:gsub(",", "\v")
+            return s
+        end)
+        -- Cleanup declarations (the most nested ones only, which may be
+        -- contained in "@supports (...) {...}" or "@media (...) {...}")
+        css_text = css_text:gsub(" *{([^{}]*)} *", function(s)
+            -- Comments inside declaration may be mixed with properties, on a same line,
+            -- before or after them, and we don't know if they apply to what's before or
+            -- what's after, except when they are standalone and probably apply to the
+            -- next line. So, when not standalone, double indent them (so it looks like
+            -- they apply to what's above - but will still look fine if they are about
+            -- what's after.
+            s = "\n" .. s -- so the next one match on the first line
+            s = s:gsub("\n */%*", "\a/*")          -- '/*' with only blank before: mark them with '\a'
+            s = s:gsub(" *([^\a])/%*", "\n\t/*")   -- unmarked '/*' (content before): marked, more indentation later
+            s = s:gsub("\a", "")                   -- remove mark
+            s = s:gsub("\t", "\a")                 -- replace mark by one that is not caught by '%s'
+            s = s:gsub("%*/%s*", "*/\n")           -- '*/' end of css comment: newline after
+            s = s:gsub("%s*;%s*", ";\n")           -- newline after ';'
+            s = s:gsub("\n+%s*", "\n    ")         -- remove blank lines, 4 spaces indent on all lines
+            s = s:gsub("\a", "    ")               -- expand our \a marks to have these /* more indented
+            s = s:gsub("%s*:%s*", ": ")            -- normalize spacing in "keyword: value"
+            s = s:gsub("^%s*(.-)%s*$", "\n    %1") -- remove leading and trailing spaces, indent first line
+            s = s:gsub("^%s*$", "")                -- but have empty declaration really empty
+            -- less indent for these crengine specific tweaks to the followup properties
+            s = s:gsub("\n    %-cr%-hint: late", "\n -cr-hint: late")
+            s = s:gsub("\n    %-cr%-only%-if", "\n -cr-only-if")
+            -- Protect and normalize ',' in declarations (ie. in font-family list, rgb()...)
+            s = s:gsub("%s*,%s*", "\v ")
+            return " {" .. s .. "\n}"
         end)
         -- Have each selector (separated by ',') on a new line
         css_text = css_text:gsub("%s*,%s*", " ,\n")
-        -- Restore hidden ',' in declarations
-        css_text = css_text:gsub("\t", ", ")
+        css_text = css_text:gsub("\n *([^\n]+),", "\n%1,") -- remove leading spaces on the first one
+        css_text = css_text:gsub("\n *([^\n]+){", "\n%1{") -- remove leading spaces on a standalone one
+        -- Make sure { is on the same line with the selector it follows
+        css_text = css_text:gsub("%s*\n *{", " {")
+        -- Make sure we have a newline after our }
+        css_text = css_text:gsub("\n} *([^\n]+)", "\n}\n%1")
+        -- Restore all protected chars
+        css_text = css_text:gsub("\v", ",")
+        css_text = css_text:gsub("\f", ":")
+        css_text = css_text:gsub("\b", ";")
     else
         -- Go thru previous method to have something standard to work on
         css_text = util.prettifyCSS(css_text)
@@ -1348,6 +1437,8 @@ end
 -- @boolean case_sensitive
 -- @number start_pos Position number in text to start search from
 -- @treturn number Position number or 0 if not found
+-- @treturn table Text char list
+-- @treturn table Search string char list
 function util.stringSearch(txt, str, case_sensitive, start_pos)
     if not case_sensitive then
         str = Utf8Proc.lowercase(util.fixUtf8(str, "?"))
@@ -1374,7 +1465,9 @@ function util.stringSearch(txt, str, case_sensitive, start_pos)
             break
         end
     end
-    return char_pos
+    -- Returned charlists are used in TextViewer find,
+    -- to avoid double call of util.splitToChars()
+    return char_pos, txt_charlist, str_charlist
 end
 
 local WrappedFunction_mt = {
@@ -1459,6 +1552,14 @@ function util.wrapMethod(target_table, target_field_name, new_func, before_callb
     }, WrappedFunction_mt)
     target_table[target_field_name] = wrapped
     return wrapped
+end
+
+-- Round a given "num" to the decimal points of "points"
+-- (i.e. `round_decimal(0.000000001, 2)` will yield `0.00`)
+function util.round_decimal(num, points)
+    local op = 10 ^ points
+
+    return math.floor(num * op) / op
 end
 
 return util

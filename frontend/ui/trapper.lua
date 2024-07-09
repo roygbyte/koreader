@@ -179,8 +179,10 @@ function Trapper:info(text, fast_refresh)
                 return false
             end
             if self.current_widget then
-                -- Re-show current widget that was dismissed
-                -- (this is fine for our simple InfoMessage)
+                -- Resurect a dead widget. This should only be performed by trained Necromancers.
+                -- Do NOT do this at home, kids.
+                -- Some state *might* be lost, but the basics should survive...
+                self.current_widget:init()
                 UIManager:show(self.current_widget)
             end
             UIManager:forceRePaint()
@@ -614,7 +616,7 @@ function Trapper:dismissableRunInSubprocess(task, trap_widget_or_string, task_re
             end
             -- The go_on_func resumed us: we have not been dismissed.
             -- Check if sub process has ended
-            -- Depending on the the size of what the child has to write,
+            -- Depending on the size of what the child has to write,
             -- it may has ended (if data fits in the kernel pipe buffer) or
             -- it may still be alive blocking on write() (if data exceeds
             -- the kernel pipe buffer)

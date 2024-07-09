@@ -2,11 +2,11 @@ local Blitbuffer = require("ffi/blitbuffer")
 local Cache = require("cache")
 local Device = require("device")
 local Geom = require("ui/geometry")
+local InputContainer = require("ui/widget/container/inputcontainer")
 local Persist = require("persist")
 local RenderImage = require("ui/renderimage")
 local TileCacheItem = require("document/tilecacheitem")
 local UIManager = require("ui/uimanager")
-local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local Screen = Device.screen
 local ffiutil = require("ffi/util")
 local logger = require("logger")
@@ -18,13 +18,15 @@ local _ = require("gettext")
 -- It handles launching via the menu or Dispatcher/Gestures two fullscreen
 -- widgets related to showing pages and thumbnails that will make use of
 -- its services: BookMap and PageBrowser.
-local ReaderThumbnail = WidgetContainer:extend{}
+local ReaderThumbnail = InputContainer:extend{}
 
 function ReaderThumbnail:init()
-    if not Device:isTouchDevice() then
+    self:registerKeyEvents()
+    if not Device:isTouchDevice() and not Device:useDPadAsActionKeys() then
         -- The BookMap and PageBrowser widgets depend too much on gestures,
-        -- making them work with keys would be hard and very limited, so
+        -- making them work with not enough keys on Non-Touch would be hard and very limited, so
         -- just don't make them available.
+        -- We will only let BookMap run on useDPadAsActionKeys devices.
         return
     end
 
@@ -62,13 +64,31 @@ function ReaderThumbnail:init()
     end
 end
 
+function ReaderThumbnail:registerKeyEvents()
+    if Device:hasDPad() and Device:useDPadAsActionKeys() then
+        if Device:hasKeyboard() then
+            self.key_events.ShowBookMap = { { "Shift", "Down" } }
+        else
+            self.key_events.ShowBookMap = { { "ScreenKB", "Down" } }
+        end
+    end
+end
+
 function ReaderThumbnail:addToMainMenu(menu_items)
     menu_items.book_map = {
         text = _("Book map"),
         callback = function()
             self:onShowBookMap()
         end,
+        -- Show the alternative overview mode (which is just a restricted
+        -- variation of the main book map) with long-press (let's avoid
+        -- adding another item in the crowded first menu).
+        hold_callback = function()
+            self:onShowBookMap(true)
+        end,
     }
+    -- PageBrowser still needs some work before we can let it run on non-touch devices with useDPadAsActionKeys
+    if Device:hasDPad() and Device:useDPadAsActionKeys() then return end
     menu_items.page_browser = {
         text = _("Page browser"),
         callback = function()
@@ -77,10 +97,11 @@ function ReaderThumbnail:addToMainMenu(menu_items)
     }
 end
 
-function ReaderThumbnail:onShowBookMap()
+function ReaderThumbnail:onShowBookMap(overview_mode)
     local BookMapWidget = require("ui/widget/bookmapwidget")
     UIManager:show(BookMapWidget:new{
         ui = self.ui,
+        overview_mode = overview_mode,
     })
     return true
 end
@@ -179,11 +200,11 @@ function ReaderThumbnail:removeFromCache(hash_subs, remove_only_non_matching)
     return nb_removed, size_removed
 end
 
-function ReaderThumbnail:resetCachedPagesForBookmarks(...)
+function ReaderThumbnail:resetCachedPagesForBookmarks(annotations)
     -- Multiple bookmarks may be provided
     local start_page, end_page
-    for i = 1, select("#", ...) do
-        local bm = select(i, ...)
+    for i = 1, #annotations do
+        local bm = annotations[i]
         if self.ui.rolling then
             -- Look at all properties that may be xpointers
             for _, k in ipairs({"page", "pos0", "pos1"}) do
@@ -243,6 +264,10 @@ end
 function ReaderThumbnail:getPageThumbnail(page, width, height, batch_id, when_generated_callback)
     self:setupCache()
     self.current_target_size_tag = string.format("w%d_h%d", width, height)
+    if self.ui.rolling and Screen.night_mode and self.ui.document.configurable.nightmode_images == 1 then
+        -- We'll get a different bb in this case: it needs its own cache hash
+        self.current_target_size_tag = self.current_target_size_tag .. "_nm"
+    end
     local hash = string.format("p%d-%s", page, self.current_target_size_tag)
     local tile = self.tile_cache and self.tile_cache:check(hash)
     if tile then
@@ -267,6 +292,10 @@ function ReaderThumbnail:getPageThumbnail(page, width, height, batch_id, when_ge
 end
 
 function ReaderThumbnail:ensureTileGeneration()
+    if not self._standby_prevented then
+        self._standby_prevented = true
+        UIManager:preventStandby()
+    end
     local has_pids_still_to_collect = self:collectPids()
 
     local still_in_progress = false
@@ -307,6 +336,11 @@ function ReaderThumbnail:ensureTileGeneration()
     end
     if self.req_in_progress or has_pids_still_to_collect or next(self.thumbnails_requests) then
         self._ensureTileGeneration_action()
+    else
+        if self._standby_prevented then
+            self._standby_prevented = false
+            UIManager:allowStandby()
+        end
     end
 end
 
@@ -413,12 +447,18 @@ function ReaderThumbnail:_getPageImage(page)
         -- CRE documents: pages all have the aspect ratio of our screen (alt top status bar
         -- will be croped out after drawing), we will show them just as rendered.
         self.ui.rolling.rendering_state = nil -- Remove any partial rerendering icon
-        self.ui.view:onSetViewMode("page") -- Get out of scroll mode
-        if self.ui.font.gamma_index < 30 then  -- Increase font gamma (if not already increased),
+        if self.ui.view.view_mode == "scroll" then
+            -- Get out of scroll mode, and be sure we'll be in one-page mode as that
+            -- is what is shown in scroll mode (needs to do the following in that
+            -- order to avoid rendering hash change)
+            self.ui.rolling:onSetVisiblePages(1)
+            self.ui.view:onSetViewMode("page")
+        end
+        if self.ui.document.configurable.font_gamma < 30 then  -- Increase font gamma (if not already increased),
             self.ui.document:setGammaIndex(30) -- as downscaling will make text grayer
         end
         self.ui.document:setImageScaling(false) -- No need for smooth scaling as all will be downscaled
-        self.ui.document:setNightmodeImages(false) -- We don't invert page images even if nightmode set: keep images as-is
+        -- (We keep "nighmode_images" as it was set: we may get and cache a different bb whether nightmode is on or off)
         self.ui.view.state.page = page -- Be on requested page
         self.ui.document:gotoPage(page) -- Current xpointer needs to be updated for some of what follows
         self.ui.bookmark:onPageUpdate(page) -- Update dogear state for this page
@@ -496,6 +536,10 @@ function ReaderThumbnail:onCloseDocument()
         self.tile_cache:clear()
         self.tile_cache = nil
     end
+    if self._standby_prevented then
+        self._standby_prevented = false
+        UIManager:allowStandby()
+    end
 end
 
 function ReaderThumbnail:onColorRenderingUpdate()
@@ -507,9 +551,6 @@ end
 ReaderThumbnail.onDocumentRerendered = ReaderThumbnail.resetCache
 ReaderThumbnail.onDocumentPartiallyRerendered = ReaderThumbnail.resetCache
 -- Emitted When adding/removing/updating bookmarks and highlights
-ReaderThumbnail.onBookmarkAdded = ReaderThumbnail.resetCachedPagesForBookmarks
-ReaderThumbnail.onBookmarkRemoved = ReaderThumbnail.resetCachedPagesForBookmarks
-ReaderThumbnail.onBookmarkUpdated = ReaderThumbnail.resetCachedPagesForBookmarks
-ReaderThumbnail.onBookmarkEdited = ReaderThumbnail.resetCachedPagesForBookmarks
+ReaderThumbnail.onAnnotationsModified = ReaderThumbnail.resetCachedPagesForBookmarks
 
 return ReaderThumbnail

@@ -145,8 +145,8 @@ function TouchMenuItem:init()
 
     self._underline_container = UnderlineContainer:new{
         vertical_align = "center",
-        dimen = self.dimen,
-        self.item_frame
+        dimen = self.dimen:copy(),
+        self.item_frame,
     }
 
     self[1] = self._underline_container
@@ -483,7 +483,7 @@ function TouchMenu:init()
     -- borders are pushed off-(screen-)width and so not visible.
     -- We'll then be similar to bottom menu ConfigDialog (where this
     -- nice effect is caused by some width calculations bug).
-    if not self.dimen then self.dimen = Geom:new{} end
+    if not self.dimen then self.dimen = Geom:new() end
     self.show_parent = self.show_parent or self
     if not self.close_callback then
         self.close_callback = function()
@@ -511,6 +511,7 @@ function TouchMenu:init()
     }
 
     self.key_events.Back = { { Input.group.Back } }
+    self.key_events.Close = { { "Menu" } }
     if Device:hasFewKeys() then
         self.key_events.Back = { { "Left" } }
     end
@@ -649,8 +650,8 @@ function TouchMenu:onCloseWidget()
     -- Don't do anything when we're switching between the two, or if we don't actually have a live instance of 'em...
     local FileManager = require("apps/filemanager/filemanager")
     local ReaderUI = require("apps/reader/readerui")
-    local reader_ui = ReaderUI:_getRunningInstance()
-    if (FileManager.instance and not FileManager.instance.tearing_down) or (reader_ui and not reader_ui.tearing_down) then
+    if (FileManager.instance and not FileManager.instance.tearing_down)
+            or (ReaderUI.instance and not ReaderUI.instance.tearing_down) then
         UIManager:setDirty(nil, "flashui")
     end
 end
@@ -798,6 +799,11 @@ end
 function TouchMenu:backToUpperMenu(no_close)
     if #self.item_table_stack ~= 0 then
         self.item_table = table.remove(self.item_table_stack)
+        -- Allow a menu table to refresh itself when going up (ie. from a setting
+        -- submenu that may want to have its parent menu updated).
+        if self.item_table.needs_refresh and self.item_table.refresh_func then
+            self.item_table = self.item_table.refresh_func()
+        end
         self.page = 1
         if self.parent_id then
             self:_recalculatePageLayout() -- we need an accurate self.perpage

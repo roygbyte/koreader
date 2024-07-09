@@ -124,20 +124,14 @@ function Profiles:getSubMenuItems()
                 text = _("Execute"),
                 callback = function(touchmenu_instance)
                     touchmenu_instance:onClose()
-                    local show_as_quickmenu = v.settings.show_as_quickmenu
-                    self.data[k].settings.show_as_quickmenu = nil
-                    self:onProfileExecute(k)
-                    self.data[k].settings.show_as_quickmenu = show_as_quickmenu
+                    self:onProfileExecute(k, { qm_show = false })
                 end,
             },
             {
                 text = _("Show as QuickMenu"),
                 callback = function(touchmenu_instance)
                     touchmenu_instance:onClose()
-                    local show_as_quickmenu = v.settings.show_as_quickmenu
-                    self.data[k].settings.show_as_quickmenu = true
-                    self:onProfileExecute(k)
-                    self.data[k].settings.show_as_quickmenu = show_as_quickmenu
+                    self:onProfileExecute(k, { qm_show = true })
                 end,
             },
             {
@@ -160,7 +154,6 @@ function Profiles:getSubMenuItems()
                 callback = function(touchmenu_instance)
                     if v.settings.registered then
                         dispatcherUnregisterProfile(k)
-                        self:updateGestures(self.prefix..k)
                         self:updateProfiles(self.prefix..k)
                         self.data[k].settings.registered = nil
                     else
@@ -190,7 +183,6 @@ function Profiles:getSubMenuItems()
                         if v.settings.registered then
                             dispatcherUnregisterProfile(k)
                             dispatcherRegisterProfile(new_name)
-                            self:updateGestures(self.prefix..k, self.prefix..new_name)
                             self:updateProfiles(self.prefix..k, self.prefix..new_name)
                         end
                         self.data[k] = nil
@@ -232,7 +224,6 @@ function Profiles:getSubMenuItems()
                             self:updateAutostart(k)
                             if v.settings.registered then
                                 dispatcherUnregisterProfile(k)
-                                self:updateGestures(self.prefix..k)
                                 self:updateProfiles(self.prefix..k)
                             end
                             self.data[k] = nil
@@ -259,8 +250,8 @@ function Profiles:getSubMenuItems()
     return sub_item_table
 end
 
-function Profiles:onProfileExecute(name)
-    Dispatcher:execute(self.data[name])
+function Profiles:onProfileExecute(name, exec_props)
+    Dispatcher:execute(self.data[name], exec_props)
 end
 
 function Profiles:editProfileName(editCallback, old_name)
@@ -271,6 +262,7 @@ function Profiles:editProfileName(editCallback, old_name)
         buttons = {{
             {
                 text = _("Cancel"),
+                id = "close",
                 callback = function()
                     UIManager:close(name_input)
                 end,
@@ -321,6 +313,8 @@ function Profiles:getProfileFromCurrentDocument(new_name)
             "embedded_css",
             "embedded_fonts",
             "smooth_scaling",
+            "nightmode_images",
+            "status_line",
         }
     else
         document_settings = {
@@ -342,77 +336,32 @@ function Profiles:getProfileFromCurrentDocument(new_name)
             "kopt_quality",
         }
     end
+    local setting_needs_arg = {
+        ["sync_t_b_page_margins"] = true,
+        ["view_mode"]             = true,
+        ["embedded_css"]          = true,
+        ["embedded_fonts"]        = true,
+        ["smooth_scaling"]        = true,
+        ["nightmode_images"]      = true,
+        ["kopt_trim_page"]        = true,
+        ["kopt_zoom_mode_genus"]  = true,
+        ["kopt_zoom_mode_type"]   = true,
+        ["kopt_page_scroll"]      = true,
+    }
 
     local profile = { settings = { name = new_name, order = document_settings } }
     for _, v in ipairs(document_settings) do
-        profile[v] = self.document.configurable[self.ui.rolling and v or v:sub(6)]
+        -- document configurable settings do not have prefixes
+        local value = self.document.configurable[v:gsub("^kopt_", "")]
+        if setting_needs_arg[v] then
+            value = Dispatcher:getArgFromValue(v, value)
+        end
+        profile[v] = value
     end
     if self.ui.rolling then
-        profile["set_font"] = self.ui.font.font_face
-        profile["sync_t_b_page_margins"] = self.ui.typeset.sync_t_b_page_margins
-        profile["view_mode"] = self.view.view_mode
-        profile["embedded_css"] = self.ui.typeset.embedded_css
-        profile["embedded_fonts"] = self.ui.typeset.embedded_fonts
-        profile["smooth_scaling"] = self.ui.typeset.smooth_scaling
-    else
-        local trim_page_to_mode = { _("manual"), _("auto"), _("semi-auto"), _("none") }
-        local zoom_genus_to_mode = { _("manual"), _("rows"), _("columns"), _("content"), _("page") }
-        local zoom_type_to_mode = { _("height"), _("width"), _("full") }
-        profile["rotation_mode"] = self.document.configurable.rotation_mode
-        profile["kopt_trim_page"] = trim_page_to_mode[profile["kopt_trim_page"]+1]
-        profile["kopt_zoom_mode_genus"] = zoom_genus_to_mode[profile["kopt_zoom_mode_genus"]+1]
-        profile["kopt_zoom_mode_type"] = zoom_type_to_mode[profile["kopt_zoom_mode_type"]+1]
-        profile["kopt_page_scroll"] = self.view.page_scroll
+        profile["set_font"] = self.ui.font.font_face -- not in configurable settings
     end
     return profile
-end
-
-function Profiles:updateGestures(action_old_name, action_new_name)
-    local gestures_path = FFIUtil.joinPath(DataStorage:getSettingsDir(), "gestures.lua")
-    local all_gestures = LuaSettings:open(gestures_path) -- in file
-    if not all_gestures then return end
-    local updated = false
-    for section, gestures in pairs(all_gestures.data) do -- custom_multiswipes, fm, reader sections
-        for gesture_name, gesture in pairs(gestures) do
-            if gesture[action_old_name] then
-                local gesture_loaded = self.ui.gestures.gestures[gesture_name] -- in memory
-                if gesture.settings and gesture.settings.order then
-                    for i, action in ipairs(gesture.settings.order) do
-                        if action == action_old_name then
-                            if action_new_name then
-                                gesture.settings.order[i] = action_new_name
-                                gesture_loaded.settings.order[i] = action_new_name
-                            else
-                                table.remove(gesture.settings.order, i)
-                                table.remove(gesture_loaded.settings.order, i)
-                                if #gesture.settings.order == 0 then
-                                    gesture.settings.order = nil
-                                    if #gesture.settings == 0 then
-                                        gesture.settings = nil
-                                    end
-                                end
-                            end
-                            break
-                        end
-                    end
-                end
-                gesture[action_old_name] = nil
-                gesture_loaded[action_old_name] = nil
-                if action_new_name then
-                    gesture[action_new_name] = true
-                    gesture_loaded[action_new_name] = true
-                else
-                    if #gesture == 0 then
-                        all_gestures.data[section][gesture_name] = nil
-                    end
-                end
-                updated = true
-            end
-        end
-    end
-    if updated then
-        all_gestures:flush()
-    end
 end
 
 function Profiles:updateProfiles(action_old_name, action_new_name)
@@ -439,6 +388,9 @@ function Profiles:updateProfiles(action_old_name, action_new_name)
             end
             self.updated = true
         end
+    end
+    if self.ui.gestures then -- search and update the profile action in assigned gestures
+        self.ui.gestures:updateProfiles(action_old_name, action_new_name)
     end
 end
 

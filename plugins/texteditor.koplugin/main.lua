@@ -8,6 +8,7 @@ local BD = require("ui/bidi")
 local ConfirmBox = require("ui/widget/confirmbox")
 local DataStorage = require("datastorage")
 local Dispatcher = require("dispatcher")
+local DocumentRegistry = require("document/documentregistry")
 local Font = require("ui/font")
 local QRMessage = require("ui/widget/qrmessage")
 local InfoMessage = require("ui/widget/infomessage")
@@ -28,6 +29,7 @@ local T = ffiutil.template
 
 local TextEditor = WidgetContainer:extend{
     name = "texteditor",
+    fullname = _("Text editor"),
     settings_file = DataStorage:getSettingsDir() .. "/text_editor.lua",
     settings = nil, -- loaded only when needed
     -- how many to display in menu (10x3 pages minus our 3 default menu items):
@@ -46,6 +48,25 @@ end
 function TextEditor:init()
     self:onDispatcherRegisterActions()
     self.ui.menu:registerToMainMenu(self)
+    self:registerDocumentRegistryAuxProvider()
+end
+
+function TextEditor:registerDocumentRegistryAuxProvider()
+    DocumentRegistry:addAuxProvider({
+        provider_name = self.fullname,
+        provider = self.name,
+        order = 30, -- order in OpenWith dialog
+        disable_file = true,
+        disable_type = false,
+    })
+end
+
+function TextEditor:isFileTypeSupported(file)
+    return true
+end
+
+function TextEditor:openFile(file)
+    self:checkEditFile(file)
 end
 
 function TextEditor:loadSettings()
@@ -94,7 +115,7 @@ end
 
 function TextEditor:addToMainMenu(menu_items)
     menu_items.text_editor = {
-        text = _("Text editor"),
+        text = self.fullname,
         sub_item_table_func = function()
             return self:getSubMenuItems()
         end,
@@ -472,10 +493,11 @@ function TextEditor:readFileContent(file_path)
 end
 
 function TextEditor:saveFileContent(file_path, content)
-    local file, err = io.open(file_path, "wb")
-    if file then
-        file:write(content)
-        file:close()
+    local ok, err = util.writeToFile(content, file_path)
+    if ok then
+        if self.ui.file_chooser then
+            self.ui.file_chooser:refreshPath()
+        end
         logger.info("TextEditor: saved file", file_path)
         return true
     end
@@ -545,13 +567,13 @@ function TextEditor:editFile(file_path, readonly)
         cursor_at_end = false,
         readonly = readonly,
         add_nav_bar = true,
-        keyboard_hidden = not self.show_keyboard_on_start,
+        keyboard_visible = self.show_keyboard_on_start, -- InputDialog will enforce false if readonly
         scroll_by_pan = true,
         buttons = {buttons_first_row},
-        -- Set/save view and cursor position callback
+        -- Store/retrieve view and cursor position callback
         view_pos_callback = function(top_line_num, charpos)
-            -- This same callback is called with no argument to get initial position,
-            -- and with arguments to give back final position when closed.
+            -- This same callback is called with no arguments on init to retrieve the stored initial position,
+            -- and with arguments to store the final position on close.
             if top_line_num and charpos then
                 self.last_view_pos[file_path] = {top_line_num, charpos}
             else
@@ -572,7 +594,7 @@ function TextEditor:editFile(file_path, readonly)
         end,
         -- File saving callback
         save_callback = function(content, closing) -- Will add Save/Close buttons
-            if self.readonly then
+            if readonly then
                 -- We shouldn't be called if read-only, but just in case
                 return false, _("File is read only")
             end
@@ -641,8 +663,10 @@ Do you want to keep this file as empty, or do you prefer to delete it?
 
     }
     UIManager:show(input)
-    input:onShowKeyboard()
-    -- Note about self.readonly:
+    if self.show_keyboard_on_start and not readonly then
+        input:onShowKeyboard()
+    end
+    -- Note about readonly:
     -- We might have liked to still show keyboard even if readonly, just
     -- to use the arrow keys for line by line scrolling with cursor.
     -- But it's easier to just let InputDialog and InputText do their

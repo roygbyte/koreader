@@ -1,12 +1,32 @@
 local Device = require("device")
+local lfs = require("libs/libkoreader-lfs")
 
-local command
---- @todo (hzj-jie): Does pocketbook provide ntpdate?
-if Device:isKobo() then
-    command = "ntpd -q -n -p pool.ntp.org"
-elseif Device:isCervantes() or Device:isKindle() or Device:isPocketBook() then
-    command = "ntpdate pool.ntp.org"
-else
+local ffi = require("ffi")
+local C = ffi.C
+require("ffi/posix_h")
+-- We need to be root to be able to set the time (CAP_SYS_TIME)
+if C.getuid() ~= 0 then
+    return { disabled = true, }
+end
+
+local ntp_cmd
+-- Check if we have access to ntpd or ntpdate
+if os.execute("command -v ntpd >/dev/null") == 0 then
+    -- Make sure it's actually busybox's implementation, as the syntax may otherwise differ...
+    -- (Of particular note, Kobo ships busybox ntpd, but not ntpdate; and Kindle ships ntpdate and !busybox ntpd).
+    local path = os.getenv("PATH") or ""
+    for p in path:gmatch("([^:]+)") do
+        local sym = lfs.symlinkattributes(p .. "/ntpd")
+        if sym and sym.mode == "link" and string.sub(sym.target, -7) == "busybox" then
+            ntp_cmd = "ntpd -q -n -p pool.ntp.org"
+            break
+        end
+    end
+end
+if not ntp_cmd and os.execute("command -v ntpdate >/dev/null") == 0 then
+    ntp_cmd = "ntpdate pool.ntp.org"
+end
+if not ntp_cmd then
     return { disabled = true, }
 end
 
@@ -40,12 +60,17 @@ local function syncNTP()
     UIManager:show(info)
     UIManager:forceRePaint()
     local txt
-    if os.execute(command) ~= 0 then
+    if os.execute(ntp_cmd) ~= 0 then
         txt = _("Failed to retrieve time from server. Please check your network configuration.")
     else
         txt = currentTime()
+        os.execute("hwclock -u -w")
+
+        -- On Kindle, do it the native way, too, to make sure the native UI gets the memo...
+        if Device:isKindle() and lfs.attributes("/usr/sbin/setdate", "mode") == "file" then
+            os.execute(string.format("/usr/sbin/setdate '%d'", os.time()))
+        end
     end
-    os.execute("hwclock -u -w")
     UIManager:close(info)
     UIManager:show(InfoMessage:new{
         text = txt,

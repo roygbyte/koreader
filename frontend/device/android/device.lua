@@ -1,9 +1,11 @@
-local FFIUtil = require("ffi/util")
-local Generic = require("device/generic/device")
 local A, android = pcall(require, "android")  -- luacheck: ignore
+local Event = require("ui/event")
 local Geom = require("ui/geometry")
+local Generic = require("device/generic/device")
+local UIManager
 local ffi = require("ffi")
 local C = ffi.C
+local FFIUtil = require("ffi/util")
 local lfs = require("libs/libkoreader-lfs")
 local logger = require("logger")
 local util = require("util")
@@ -72,6 +74,7 @@ local Device = Generic:extend{
     model = android.prop.product,
     hasKeys = yes,
     hasDPad = no,
+    hasSeamlessWifiToggle = no, -- Requires losing focus to the sytem's network settings and user interaction
     hasExitOptions = no,
     hasEinkScreen = function() return android.isEink() end,
     hasColorScreen = android.isColorScreen,
@@ -113,6 +116,22 @@ local Device = Generic:extend{
     end,
 }
 
+function Device:otaModel()
+    -- "x86", "x64", "arm", "arm64", "ppc", "mips" or "mips64".
+    local arch = jit.arch
+    local model
+    if arch == "arm64" then
+        model = "android-arm64"
+    elseif arch == "x86" then
+        model = "android-x86"
+    elseif arch == "x64" then
+        model = "android-x86_64"
+    else
+        model = "android"
+    end
+    return model, "link"
+end
+
 function Device:init()
     self.screen = require("ffi/framebuffer_android"):new{device = self, debug = logger.dbg}
     self.powerd = require("device/android/powerd"):new{device = self}
@@ -129,8 +148,6 @@ function Device:init()
         device = self,
         event_map = event_map,
         handleMiscEv = function(this, ev)
-            local Event = require("ui/event")
-            local UIManager = require("ui/uimanager")
             logger.dbg("Android application event", ev.code)
             if ev.code == C.APP_CMD_SAVE_STATE then
                 UIManager:broadcastEvent(Event:new("FlushSettings"))
@@ -280,12 +297,22 @@ function Device:init()
     Generic.init(self)
 end
 
+function Device:UIManagerReady(uimgr)
+    UIManager = uimgr
+end
+
 function Device:initNetworkManager(NetworkMgr)
     function NetworkMgr:turnOnWifi(complete_callback)
         android.openWifiSettings()
+        if complete_callback then
+            complete_callback()
+        end
     end
     function NetworkMgr:turnOffWifi(complete_callback)
         android.openWifiSettings()
+        if complete_callback then
+            complete_callback()
+        end
     end
 
     function NetworkMgr:openSettings()
@@ -446,11 +473,17 @@ function Device:info()
     return common_text..platform_text..eink_text..wakelocks_text
 end
 
+function Device:isDeprecated()
+    return self.firmware_rev < 18
+end
+
 function Device:test()
     android.runTest()
 end
 
 function Device:exit()
+    Generic.exit(self)
+
     android.LOGI(string.format("Stopping %s main activity", android.prop.name))
     android.lib.ANativeActivity_finish(android.app.activity)
 end
@@ -483,7 +516,6 @@ function Device:showLightDialog()
     -- Delay it until next tick so that the event loop gets a chance to drain the input queue,
     -- and consume the APP_CMD_LOST_FOCUS event.
     -- This helps prevent ANRs on Tolino (c.f., #6583 & #7552).
-    local UIManager = require("ui/uimanager")
     UIManager:nextTick(function() self:_showLightDialog() end)
 end
 
@@ -492,15 +524,18 @@ function Device:_showLightDialog()
     android.lights.showDialog(title, _("Brightness"), _("Warmth"), _("OK"), _("Cancel"))
 
     local action = android.lights.dialogState()
+    while action == C.ALIGHTS_DIALOG_OPENED do
+        FFIUtil.usleep(250) -- dont pin the CPU
+        action = android.lights.dialogState()
+    end
     if action == C.ALIGHTS_DIALOG_OK then
         self.powerd.fl_intensity = self.powerd:frontlightIntensityHW()
+        self.powerd:_decideFrontlightState()
         logger.dbg("Dialog OK, brightness: " .. self.powerd.fl_intensity)
         if android.isWarmthDevice() then
             self.powerd.fl_warmth = self.powerd:frontlightWarmthHW()
             logger.dbg("Dialog OK, warmth: " .. self.powerd.fl_warmth)
         end
-        local Event = require("ui/event")
-        local UIManager = require("ui/uimanager")
         UIManager:broadcastEvent(Event:new("FrontlightStateChanged"))
     elseif action == C.ALIGHTS_DIALOG_CANCEL then
         logger.dbg("Dialog Cancel, brightness: " .. self.powerd.fl_intensity)
@@ -519,7 +554,6 @@ end
 function Device:download(link, name, ok_text)
     local ConfirmBox = require("ui/widget/confirmbox")
     local InfoMessage = require("ui/widget/infomessage")
-    local UIManager = require("ui/uimanager")
     local ok = android.download(link, name)
     if ok == C.ADOWNLOAD_EXISTS then
         self:install()
@@ -540,8 +574,6 @@ end
 
 function Device:install()
     local ConfirmBox = require("ui/widget/confirmbox")
-    local Event = require("ui/event")
-    local UIManager = require("ui/uimanager")
     UIManager:show(ConfirmBox:new{
         text = _("Update is ready. Install it now?"),
         ok_text = _("Install"),

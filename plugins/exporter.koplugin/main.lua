@@ -1,28 +1,29 @@
---[[
- Export highlights to different targets.
+--[[--
+Export highlights to different targets.
 
- Some conventions:
+Some conventions:
 
- - Target: each local format or remote service this plugin can translate to.
+- Target: each local format or remote service this plugin can translate to.
 
- Each new target should inherit from "formats/base" and implement *at least* an export function.
+Each new target should inherit from "formats/base" and implement *at least* an export function.
 
- - Highlight: Text or image in document. Stored in "highlights" table of documents sidecar file.
+- Highlight: Text or image in document. Stored in "highlights" table of documents sidecar file.
 
- Parser uses this table.
- If highlight._._.text field is empty the parser uses highlight._._.pboxes field to get an image instead.
+Parser uses this table.
+If highlight._._.text field is empty the parser uses highlight._._.pboxes field to get an image instead.
 
- - Bookmarks: Data in bookmark explorer. Stored in "bookmarks" table of documents sidecar file.
+- Bookmarks: Data in bookmark explorer. Stored in "bookmarks" table of documents sidecar file.
 
- Every field in bookmarks._ has "text" and "notes" fields.
- When user edits a highlight or "renames" bookmark the text field is created or updated.
- The parser looks to bookmarks._.text field for edited notes. bookmarks._.notes isn't used for exporting operations.
+Every field in bookmarks._ has "text" and "notes" fields.
+When user edits a highlight or "renames" bookmark the text field is created or updated.
+The parser looks to bookmarks._.text field for edited notes. bookmarks._.notes isn't used for exporting operations.
 
- - Clippings: Parsed form of highlights. Single table for all documents.
+- Clippings: Parsed form of highlights. Single table for all documents.
 
- - Booknotes: Every table in clippings table. clippings = {"title" = booknotes}
+- Booknotes: Every table in clippings table. clippings = {"title" = booknotes}
 
---]]
+@module koplugin.exporter
+--]]--
 
 local DataStorage = require("datastorage")
 local Device = require("device")
@@ -31,6 +32,7 @@ local MyClipping = require("clip")
 local NetworkMgr = require("ui/network/manager")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
+local filemanagerutil = require("apps/filemanager/filemanagerutil")
 local T = require("ffi/util").template
 local logger = require("logger")
 local _ = require("gettext")
@@ -38,7 +40,7 @@ local _ = require("gettext")
 
 -- migrate settings from old "evernote.koplugin" or from previous (monolithic) "exporter.koplugin"
 local function migrateSettings()
-    local formats = { "html", "joplin", "json", "readwise", "text", "my_clippings" }
+    local formats = { "flomo", "html", "joplin", "json", "memos", "my_clippings", "readwise", "text", "xmnote" }
 
     local settings = G_reader_settings:readSetting("exporter")
     if not settings then
@@ -96,15 +98,17 @@ end
 
 local Exporter = WidgetContainer:extend{
     name = "exporter",
-    clipping_dir = DataStorage:getDataDir() .. "/clipboard",
     targets = {
+        flomo = require("target/flomo"),
         html = require("target/html"),
         joplin = require("target/joplin"),
         json = require("target/json"),
         markdown = require("target/markdown"),
+        memos = require("target/memos"),
+        my_clippings = require("target/my_clippings"),
         readwise = require("target/readwise"),
         text = require("target/text"),
-        my_clippings = require("target/my_clippings"),
+        xmnote = require("target/xmnote"),
     },
 }
 
@@ -150,17 +154,34 @@ function Exporter:getDocumentClippings()
     return self.parser:parseCurrentDoc(self.view) or {}
 end
 
+--- Parse and export highlights from the currently opened document.
 function Exporter:exportCurrentNotes()
+    self.ui.annotation:updatePageNumbers()
     local clippings = self:getDocumentClippings()
     self:exportClippings(clippings)
 end
 
+--- Parse and export highlights from all the documents in History
+-- and from the Kindle "My Clippings.txt".
 function Exporter:exportAllNotes()
     local clippings = {}
     clippings = updateHistoryClippings(clippings, self.parser:parseHistory())
     if Device:isKindle() then
         clippings = updateMyClippings(clippings, self.parser:parseMyClippings())
     end
+    for title, booknotes in pairs(clippings) do
+        -- chapter number is zero
+        if #booknotes == 0 then
+            clippings[title] = nil
+        end
+    end
+    self:exportClippings(clippings)
+end
+
+--- Parse and export highlights from selected documents.
+-- @tparam table files list of files as a table of {[file_path] = true}
+function Exporter:exportFilesNotes(files)
+    local clippings = self.parser:parseFiles(files)
     for title, booknotes in pairs(clippings) do
         -- chapter number is zero
         if #booknotes == 0 then
@@ -262,7 +283,13 @@ function Exporter:addToMainMenu(menu_items)
             {
                 text = _("Choose formats and services"),
                 sub_item_table = submenu,
-                separator = true,
+            },
+            {
+                text = _("Choose export folder"),
+                keep_menu_open = true,
+                callback = function()
+                    self:chooseFolder()
+                end,
             },
         }
     }
@@ -280,6 +307,20 @@ function Exporter:addToMainMenu(menu_items)
         })
     end
     menu_items.exporter = menu
+end
+
+function Exporter:chooseFolder()
+    local settings = G_reader_settings:readSetting("exporter", {})
+    local title_header = _("Current export folder:")
+    local current_path = settings.clipping_dir
+    local default_path = DataStorage:getFullDataDir() .. "/clipboard"
+    local caller_callback = function(path)
+        settings.clipping_dir = path
+        for _, target in pairs(self.targets) do
+            target.clipping_dir = path
+        end
+    end
+    filemanagerutil.showChooseDialog(title_header, caller_callback, current_path, default_path)
 end
 
 return Exporter

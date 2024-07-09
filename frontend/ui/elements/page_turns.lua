@@ -173,7 +173,7 @@ When enabled the UI direction for the Table of Contents, Book Map, and Page Brow
 
 if Device:canDoSwipeAnimation() then
     table.insert(PageTurns.sub_item_table, {
-        text =_("Page turn animations"),
+        text = _("Page turn animations"),
         checked_func = function()
             return G_reader_settings:isTrue("swipe_animations")
         end,
@@ -182,27 +182,6 @@ if Device:canDoSwipeAnimation() then
         end,
         separator = true,
     })
-end
-
-if Device:hasKeys() then
-    table.insert(PageTurns.sub_item_table, {
-        text = _("Invert page turn buttons"),
-        checked_func = function()
-            return G_reader_settings:isTrue("input_invert_page_turn_keys")
-        end,
-        callback = function()
-            UIManager:broadcastEvent(Event:new("SwapPageTurnButtons"))
-        end,
-    })
-end
-
-if not Device:isTouchDevice() then
-    if Device:hasKeys() then
-        -- We just need the last item added above.
-        PageTurns = PageTurns.sub_item_table[#PageTurns.sub_item_table]
-    else
-        PageTurns = {} -- no menu item
-    end
 end
 
 return PageTurns

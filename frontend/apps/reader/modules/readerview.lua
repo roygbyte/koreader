@@ -22,6 +22,7 @@ local logger = require("logger")
 local optionsutil = require("ui/data/optionsutil")
 local Size = require("ui/size")
 local time = require("ui/time")
+local util = require("util")
 local _ = require("gettext")
 local Screen = Device.screen
 local T = require("ffi/util").template
@@ -47,10 +48,11 @@ local ReaderView = OverlapGroup:extend{
     -- properties of the gap drawn between each page in scroll mode:
     page_gap = nil, -- table
     -- DjVu page rendering mode (used in djvu.c:drawPage())
-    render_mode = G_defaults:readSetting("DRENDER_MODE"), -- default to COLOR
+    render_mode = nil, -- default to COLOR, will be set in onReadSettings()
     -- Crengine view mode
     view_mode = G_defaults:readSetting("DCREREADER_VIEW_MODE"), -- default to page mode
     hinting = true,
+    emitHintPageEvent = nil,
 
     -- visible area within current viewing page
     visible_area = nil,
@@ -69,6 +71,10 @@ local ReaderView = OverlapGroup:extend{
     -- might be directly updated by readerpaging/readerrolling when
     -- they handle some panning/scrolling, to request "fast" refreshes
     currently_scrolling = false,
+
+    -- image content stats of the current page, if supported by the Document engine
+    img_count = nil,
+    img_coverage = nil,
 }
 
 function ReaderView:init()
@@ -89,7 +95,6 @@ function ReaderView:init()
         temp_drawer = "invert",
         temp = {},
         saved_drawer = "lighten",
-        saved = {},
         indicator = nil, -- geom: non-touch highlight position indicator: {x = 50, y=50}
     }
     self.page_states = {}
@@ -100,6 +105,10 @@ function ReaderView:init()
     self.visible_area = Geom:new{x = 0, y = 0, w = 0, h = 0}
     self.page_area = Geom:new{x = 0, y = 0, w = 0, h = 0}
     self.dim_area = Geom:new{x = 0, y = 0, w = 0, h = 0}
+
+    -- Zero-init for sanity
+    self.img_count = 0
+    self.img_coverage = 0
 
     self:addWidgets()
     self.emitHintPageEvent = function()
@@ -200,19 +209,26 @@ function ReaderView:paintTo(bb, x, y)
         end
     end
 
-    -- dim last read area
+    -- mark last read area of overlapped pages
     if not self.dim_area:isEmpty() and self:isOverlapAllowed() then
         if self.page_overlap_style == "dim" then
-            bb:dimRect(
-                self.dim_area.x, self.dim_area.y,
-                self.dim_area.w, self.dim_area.h
-            )
-        elseif self.page_overlap_style == "arrow" then
-            local center_offset = bit.rshift(self.arrow.height, 1)
-            -- Paint at the proper y origin depending on wheter we paged forward (dim_area.y == 0) or backward
-            self.arrow:paintTo(bb, 0, self.dim_area.y == 0 and self.dim_area.h - center_offset or self.dim_area.y - center_offset)
+            bb:dimRect(self.dim_area.x, self.dim_area.y, self.dim_area.w, self.dim_area.h)
+        else
+            -- Paint at the proper y origin depending on whether we paged forward (dim_area.y == 0) or backward
+            local paint_y = self.dim_area.y == 0 and self.dim_area.h or self.dim_area.y
+            if self.page_overlap_style == "arrow" then
+                local center_offset = bit.rshift(self.arrow.height, 1)
+                self.arrow:paintTo(bb, 0, paint_y - center_offset)
+            elseif self.page_overlap_style == "line" then
+                bb:paintRect(0, paint_y, self.dim_area.w, Size.line.medium, Blitbuffer.COLOR_DARK_GRAY)
+            elseif self.page_overlap_style == "dashed_line" then
+                for i = 0, self.dim_area.w - 20, 20 do
+                    bb:paintRect(i, paint_y, 14, Size.line.medium, Blitbuffer.COLOR_DARK_GRAY)
+                end
+            end
         end
     end
+
     -- draw saved highlight
     if self.highlight_visible then
         self:drawSavedHighlight(bb, x, y)
@@ -248,17 +264,28 @@ function ReaderView:paintTo(bb, x, y)
     if self.ui.paging then
         if self.document.hw_dithering then
             self.dialog.dithered = true
+            -- Assume we're going to be showing colorful stuff on kaleido panels...
+            if Device:hasKaleidoWfm() then
+                UIManager:setDirty(nil, "color")
+            end
         end
     else
         -- Whereas for CRe,
         -- If we're attempting to show a large enough amount of image data, request dithering (without triggering another repaint ;)).
         local img_count, img_coverage = self.document:getDrawnImagesStatistics()
-        -- With some nil guards because this may not be implemented in every engine ;).
-        if img_count and img_count > 0 and img_coverage and img_coverage >= 0.075 then
+        -- We also want to deal with paging *away* from image content, which would have adverse effect on ghosting.
+        local coverage_diff = math.abs(img_coverage - self.img_coverage)
+        -- Which is why we remember the stats of the *previous* page.
+        self.img_count, self.img_coverage = img_count, img_coverage
+        if img_coverage >= 0.075 or coverage_diff >= 0.075 then
             self.dialog.dithered = true
             -- Request a flashing update while we're at it, but only if it's the first time we're painting it
             if self.state.drawn == false and G_reader_settings:nilOrTrue("refresh_on_pages_with_images") then
                 UIManager:setDirty(nil, "full")
+            end
+            -- On Kaleido panels, we'll want to use GCC16 on the actual image, always...
+            if Device:hasKaleidoWfm() and img_coverage >= 0.075 then
+                UIManager:setDirty(nil, "color")
             end
         end
         self.state.drawn = true
@@ -402,7 +429,7 @@ function ReaderView:getScrollPagePosition(pos)
 end
 
 function ReaderView:getScrollPageRect(page, rect_p)
-    local rect_s = Geom:new{}
+    local rect_s = Geom:new()
     for _, state in ipairs(self.page_states) do
         local trans_p = Geom:new(rect_p):copy()
         trans_p:transformByScale(state.zoom, state.zoom)
@@ -447,7 +474,7 @@ function ReaderView:getSinglePagePosition(pos)
 end
 
 function ReaderView:getSinglePageRect(rect_p)
-    local rect_s = Geom:new{}
+    local rect_s = Geom:new()
     local trans_p = Geom:new(rect_p):copy()
     trans_p:transformByScale(self.state.zoom, self.state.zoom)
     if self.visible_area:intersectWith(trans_p) then
@@ -506,6 +533,7 @@ function ReaderView:drawTempHighlight(bb, x, y)
 end
 
 function ReaderView:drawSavedHighlight(bb, x, y)
+    if #self.ui.annotation.annotations == 0 then return end
     if self.ui.paging then
         self:drawPageSavedHighlight(bb, x, y)
     else
@@ -513,45 +541,18 @@ function ReaderView:drawSavedHighlight(bb, x, y)
     end
 end
 
--- Returns the list of highlights in page.
--- The list includes full single-page highlights and parts of multi-page highlights.
-function ReaderView:getPageSavedHighlights(page)
-    local highlights = {}
-    local is_reflow = self.document.configurable.text_wrap
-    self.document.configurable.text_wrap = 0
-    for page_num, page_highlights in pairs(self.highlight.saved) do
-        for i, highlight in ipairs(page_highlights) do
-            -- old single-page reflow highlights do not have page in position
-            local pos0_page = highlight.pos0.page or page_num
-            local pos1_page = highlight.pos1.page or page_num
-            if pos0_page <= page and page <= pos1_page then
-                if pos0_page == pos1_page then -- single-page highlight
-                    table.insert(highlights, highlight)
-                else -- multi-page highlight
-                    local item = self.ui.highlight:getSavedExtendedHighlightPage(highlight, page, i)
-                    table.insert(highlights, item)
-                end
-            end
-        end
-    end
-    self.document.configurable.text_wrap = is_reflow
-    return highlights
-end
-
 function ReaderView:drawPageSavedHighlight(bb, x, y)
     local pages = self:getCurrentPageList()
     for _, page in ipairs(pages) do
-        local items = self:getPageSavedHighlights(page)
+        local items = self.ui.highlight:getPageSavedHighlights(page)
         for _, item in ipairs(items) do
             local boxes = self.document:getPageBoxesFromPositions(page, item.pos0, item.pos1)
             if boxes then
-                local drawer = item.drawer or self.highlight.saved_drawer
-                local draw_note_mark = self.highlight.note_mark and
-                    self.ui.bookmark:getBookmarkNote({datetime = item.datetime})
+                local draw_note_mark = item.note and self.highlight.note_mark
                 for _, box in ipairs(boxes) do
                     local rect = self:pageToScreenTransform(page, box)
                     if rect then
-                        self:drawHighlightRect(bb, x, y, rect, drawer, draw_note_mark)
+                        self:drawHighlightRect(bb, x, y, rect, item.drawer, draw_note_mark)
                         if draw_note_mark and self.highlight.note_mark == "sidemark" then
                             draw_note_mark = false -- side mark in the first line only
                         end
@@ -567,48 +568,39 @@ function ReaderView:drawXPointerSavedHighlight(bb, x, y)
     -- showing menu...). We might want to cache these boxes per page (and
     -- clear that cache when page layout change or highlights are added
     -- or removed).
-    local cur_view_top, cur_view_bottom
-    for _, items in pairs(self.highlight.saved) do
-        if items then
-            for j = 1, #items do
-                local item = items[j]
-                local pos0, pos1 = item.pos0, item.pos1
-                -- document:getScreenBoxesFromPositions() is expensive, so we
-                -- first check this item is on current page
-                if not cur_view_top then
-                    -- Even in page mode, it's safer to use pos and ui.dimen.h
-                    -- than pages' xpointers pos, even if ui.dimen.h is a bit
-                    -- larger than pages' heights
-                    cur_view_top = self.document:getCurrentPos()
-                    if self.view_mode == "page" and self.document:getVisiblePageCount() > 1 then
-                        cur_view_bottom = cur_view_top + 2 * self.ui.dimen.h
-                    else
-                        cur_view_bottom = cur_view_top + self.ui.dimen.h
+    -- Even in page mode, it's safer to use pos and ui.dimen.h
+    -- than pages' xpointers pos, even if ui.dimen.h is a bit
+    -- larger than pages' heights
+    local cur_view_top = self.document:getCurrentPos()
+    local cur_view_bottom
+    if self.view_mode == "page" and self.document:getVisiblePageCount() > 1 then
+        cur_view_bottom = cur_view_top + 2 * self.ui.dimen.h
+    else
+        cur_view_bottom = cur_view_top + self.ui.dimen.h
+    end
+    for _, item in ipairs(self.ui.annotation.annotations) do
+        if item.drawer then
+            -- document:getScreenBoxesFromPositions() is expensive, so we
+            -- first check if this item is on current page
+            local start_pos = self.document:getPosFromXPointer(item.pos0)
+            if start_pos > cur_view_bottom then return end -- this and all next highlights are after the current page
+            local end_pos = self.document:getPosFromXPointer(item.pos1)
+            if end_pos >= cur_view_top then
+                local boxes = self.document:getScreenBoxesFromPositions(item.pos0, item.pos1, true) -- get_segments=true
+                if boxes then
+                    local draw_note_mark = item.note and self.highlight.note_mark
+                    for _, box in ipairs(boxes) do
+                        if box.h ~= 0 then
+                            self:drawHighlightRect(bb, x, y, box, item.drawer, draw_note_mark)
+                            if draw_note_mark and self.highlight.note_mark == "sidemark" then
+                                draw_note_mark = false -- side mark in the first line only
+                            end
+                        end
                     end
                 end
-                local spos0 = self.document:getPosFromXPointer(pos0)
-                local spos1 = self.document:getPosFromXPointer(pos1)
-                local start_pos = math.min(spos0, spos1)
-                local end_pos = math.max(spos0, spos1)
-                if start_pos <= cur_view_bottom and end_pos >= cur_view_top then
-                    local boxes = self.document:getScreenBoxesFromPositions(pos0, pos1, true) -- get_segments=true
-                    if boxes then
-                        local drawer = item.drawer or self.highlight.saved_drawer
-                        local draw_note_mark = self.highlight.note_mark and
-                            self.ui.bookmark:getBookmarkNote({datetime = item.datetime})
-                        for _, box in ipairs(boxes) do
-                            if box.h ~= 0 then
-                                self:drawHighlightRect(bb, x, y, box, drawer, draw_note_mark)
-                                if draw_note_mark and self.highlight.note_mark == "sidemark" then
-                                    draw_note_mark = false -- side mark in the first line only
-                                end
-                            end
-                        end -- end for each box
-                    end -- end if boxes
-                end
-            end -- end for each highlight
+            end
         end
-    end -- end for all saved highlight
+    end
 end
 
 function ReaderView:drawHighlightRect(bb, _x, _y, rect, drawer, draw_note_mark)
@@ -616,23 +608,23 @@ function ReaderView:drawHighlightRect(bb, _x, _y, rect, drawer, draw_note_mark)
     if drawer == "lighten" then
         bb:lightenRect(x, y, w, h, self.highlight.lighten_factor)
     elseif drawer == "underscore" then
-        bb:paintRect(x, y + h - 1, w, 2, Blitbuffer.COLOR_GRAY)
+        bb:paintRect(x, y + h - 1, w, Size.line.thick, Blitbuffer.COLOR_GRAY_4)
     elseif drawer == "strikeout" then
         local line_y = y + math.floor(h / 2) + 1
         if self.ui.paging then
             line_y = line_y + 2
         end
-        bb:paintRect(x, line_y, w, 2, Blitbuffer.COLOR_BLACK)
+        bb:paintRect(x, line_y, w, Size.line.medium, Blitbuffer.COLOR_BLACK)
     elseif drawer == "invert" then
         bb:invertRect(x, y, w, h)
     end
     if draw_note_mark then
         if self.highlight.note_mark == "underline" then
-            bb:paintRect(x, y + h - 1, w, 2, Blitbuffer.COLOR_BLACK)
+            bb:paintRect(x, y + h - 1, w, Size.line.medium, Blitbuffer.COLOR_BLACK)
         else
             local note_mark_pos_x
             if self.ui.paging or
-                    (self.ui.document:getVisiblePageCount() == 1) or -- one-page mode
+                    (self.document:getVisiblePageCount() == 1) or -- one-page mode
                     (x < Screen:getWidth() / 2) then -- page 1 in two-page mode
                 note_mark_pos_x = self.note_mark_pos_x1
             else
@@ -679,7 +671,8 @@ function ReaderView:recalculate()
             -- start from right of page_area
             self.visible_area.x = self.page_area.x + self.page_area.w - self.visible_area.w
         end
-        if self.ui.zooming.zoom_bottom_to_top then
+        -- Check if we are in zoom_bottom_to_top
+        if self.document.configurable.zoom_direction and self.document.configurable.zoom_direction >= 2 and self.document.configurable.zoom_direction <= 5 then
             -- starts from bottom of page_area
             self.visible_area.y = self.page_area.y + self.page_area.h - self.visible_area.h
         else
@@ -799,18 +792,38 @@ end
 
 function ReaderView:onSetRotationMode(rotation)
     if rotation ~= nil then
-        if rotation == Screen:getRotationMode() then
-            return true
+        local old_rotation = Screen:getRotationMode()
+        if rotation == old_rotation then
+            return
         end
+
+        -- NOTE: We cannot rely on getScreenMode, as it actually checks the screen dimensions, instead of the rotation mode.
+        --       (i.e., it returns how the screen *looks* like, not how it's oriented relative to its native layout).
+        --       This would horribly break if you started in Portrait (both rotation and visually),
+        --       then resized your window to a Landscape layout *without* changing the rotation.
+        --       If you then attempted to switch to a Landscape *rotation*, it would mistakenly think the layout hadn't changed!
+        --       So, instead, as we're concerned with *rotation* layouts, just compare the two.
+        --       We use LinuxFB-style constants, so, Portraits are even, Landscapes are odds, making this trivial.
+        local matching_orientation = bit.band(rotation, 1) == bit.band(old_rotation, 1)
+
+        if rotation ~= old_rotation and matching_orientation then
+            -- No layout change, just rotate & repaint with a flash
+            Screen:setRotationMode(rotation)
+            UIManager:setDirty(self.dialog, "full")
+            Notification:notify(T(_("Rotation mode set to: %1"), optionsutil:getOptionText("SetRotationMode", rotation)))
+            return
+        end
+
         Screen:setRotationMode(rotation)
     end
-    UIManager:setDirty(self.dialog, "full")
+
+    UIManager:setDirty(nil, "full") -- SetDimensions will only request a partial, we want a flash
     local new_screen_size = Screen:getSize()
     self.ui:handleEvent(Event:new("SetDimensions", new_screen_size))
     self.ui:onScreenResize(new_screen_size)
     self.ui:handleEvent(Event:new("InitScrollPageStates"))
     Notification:notify(T(_("Rotation mode set to: %1"), optionsutil:getOptionText("SetRotationMode", rotation)))
-    return true
+    return
 end
 
 function ReaderView:onSetDimensions(dimensions)
@@ -854,28 +867,22 @@ In combination with zoom to fit page, page height, content height, content or co
 end
 
 function ReaderView:onReadSettings(config)
-    self.document:setTileCacheValidity(config:readSetting("tile_cache_validity_ts"))
-    self.render_mode = config:readSetting("render_mode") or 0
-    local rotation_mode = nil
-    local locked = G_reader_settings:isTrue("lock_rotation")
-    -- Keep current rotation by doing nothing when sticky rota is enabled.
-    if not locked then
-        -- Honor docsettings's rotation
-        if config:has("rotation_mode") then
-            rotation_mode = config:readSetting("rotation_mode") -- Doc's
-        else
-            -- No doc specific rotation, pickup global defaults for the doc type
-            if self.ui.paging then
-                rotation_mode = G_reader_settings:readSetting("kopt_rotation_mode") or Screen.DEVICE_ROTATED_UPRIGHT
-            else
-                rotation_mode = G_reader_settings:readSetting("copt_rotation_mode") or Screen.DEVICE_ROTATED_UPRIGHT
-            end
+    if self.ui.paging then
+        self.document:setTileCacheValidity(config:readSetting("tile_cache_validity_ts"))
+        self.render_mode = config:readSetting("render_mode") or G_defaults:readSetting("DRENDER_MODE")
+        if config:has("gamma") then -- old doc contrast setting
+            config:saveSetting("kopt_contrast", config:readSetting("gamma"))
+            config:delSetting("gamma")
         end
     end
-    if rotation_mode then
+    if G_reader_settings:nilOrFalse("lock_rotation") then
+        local setting_name = self.ui.paging and "kopt_rotation_mode" or "copt_rotation_mode"
+        -- document.configurable.rotation_mode is not ready yet
+        local rotation_mode = config:readSetting(setting_name)
+                           or G_reader_settings:readSetting(setting_name)
+                           or Screen.DEVICE_ROTATED_UPRIGHT
         self:onSetRotationMode(rotation_mode)
     end
-    self.state.gamma = config:readSetting("gamma") or 1.0
     local full_screen = config:readSetting("kopt_full_screen") or self.document.configurable.full_screen
     if full_screen == 0 then
         self.footer_visible = false
@@ -883,40 +890,6 @@ function ReaderView:onReadSettings(config)
     self:resetLayout()
     local page_scroll = config:readSetting("kopt_page_scroll") or self.document.configurable.page_scroll
     self.page_scroll = page_scroll == 1 and true or false
-    self.highlight.saved = config:readSetting("highlight", {})
-    -- Highlight formats in crengine and mupdf are incompatible.
-    -- Backup highlights when the document is opened with incompatible engine.
-    local page, page_highlights
-    while true do -- remove empty tables for pages without highlights and get the first page with highlights
-        page, page_highlights = next(self.highlight.saved)
-        if not page or #page_highlights > 0 then
-            break -- we're done (there is none, or there is some usable)
-        else
-            self.highlight.saved[page] = nil -- clean it up while we're at it, and find another one
-        end
-    end
-    if page_highlights then
-        local highlight_type = type(page_highlights[1].pos0)
-        if self.ui.rolling and highlight_type == "table" then
-            config:saveSetting("highlight_paging", self.highlight.saved)
-            self.highlight.saved = config:readSetting("highlight_rolling", {})
-            config:saveSetting("highlight", self.highlight.saved)
-            config:delSetting("highlight_rolling")
-        elseif self.ui.paging and highlight_type == "string" then
-            config:saveSetting("highlight_rolling", self.highlight.saved)
-            self.highlight.saved = config:readSetting("highlight_paging", {})
-            config:saveSetting("highlight", self.highlight.saved)
-            config:delSetting("highlight_paging")
-        end
-    else
-        if self.ui.rolling and config:has("highlight_rolling") then
-            self.highlight.saved = config:readSetting("highlight_rolling")
-            config:delSetting("highlight_rolling")
-        elseif self.ui.paging and config:has("highlight_paging") then
-            self.highlight.saved = config:readSetting("highlight_paging")
-            config:delSetting("highlight_paging")
-        end
-    end
     self.inverse_reading_order = config:isTrue("inverse_reading_order") or G_reader_settings:isTrue("inverse_reading_order")
     self.page_overlap_enable = config:isTrue("show_overlap_enable") or G_reader_settings:isTrue("page_overlap_enable") or G_defaults:readSetting("DSHOWOVERLAP")
     self.page_overlap_style = config:readSetting("page_overlap_style") or G_reader_settings:readSetting("page_overlap_style") or "dim"
@@ -992,7 +965,7 @@ function ReaderView:onGammaUpdate(gamma)
     if self.page_scroll then
         self.ui:handleEvent(Event:new("UpdateScrollPageGamma", gamma))
     end
-    Notification:notify(T(_("Font gamma set to: %1."), gamma))
+    Notification:notify(T(_("Contrast set to: %1."), gamma))
 end
 
 -- For ReaderKOptListener
@@ -1060,21 +1033,22 @@ function ReaderView:onPageGapUpdate(page_gap)
 end
 
 function ReaderView:onSaveSettings()
-    if self.document:isEdited() and G_reader_settings:readSetting("save_document") ~= "always" then
-        -- Either "disable" (and the current tiles will be wrong) or "prompt" (but the
-        -- prompt will happen later, too late to catch "Don't save"), so force cached
-        -- tiles to be ignored on next opening.
-        self.document:resetTileCacheValidity()
+    if self.ui.paging then
+        if self.document:isEdited() and G_reader_settings:readSetting("save_document") ~= "always" then
+            -- Either "disable" (and the current tiles will be wrong) or "prompt" (but the
+            -- prompt will happen later, too late to catch "Don't save"), so force cached
+            -- tiles to be ignored on next opening.
+            self.document:resetTileCacheValidity()
+        end
+        self.ui.doc_settings:saveSetting("tile_cache_validity_ts", self.document:getTileCacheValidity())
+        if self.document.is_djvu then
+            self.ui.doc_settings:saveSetting("render_mode", self.render_mode)
+        end
     end
-    self.ui.doc_settings:saveSetting("tile_cache_validity_ts", self.document:getTileCacheValidity())
-    self.ui.doc_settings:saveSetting("render_mode", self.render_mode)
     -- Don't etch the current rotation in stone when sticky rotation is enabled
-    local locked = G_reader_settings:isTrue("lock_rotation")
-    if not locked then
-        self.ui.doc_settings:saveSetting("rotation_mode", Screen:getRotationMode())
+    if G_reader_settings:nilOrFalse("lock_rotation") then
+        self.document.configurable.rotation_mode = Screen:getRotationMode() -- will be saved by ReaderConfig
     end
-    self.ui.doc_settings:saveSetting("gamma", self.state.gamma)
-    self.ui.doc_settings:saveSetting("highlight", self.highlight.saved)
     self.ui.doc_settings:saveSetting("inverse_reading_order", self.inverse_reading_order)
     self.ui.doc_settings:saveSetting("show_overlap_enable", self.page_overlap_enable)
     self.ui.doc_settings:saveSetting("page_overlap_style", self.page_overlap_style)
@@ -1103,9 +1077,13 @@ function ReaderView:getRenderModeMenuTable()
     }
 end
 
-function ReaderView:onCloseDocument()
-    -- stop any pending HintPage event
+function ReaderView:onCloseWidget()
+    -- Stop any pending HintPage event
     UIManager:unschedule(self.emitHintPageEvent)
+    --- @fixme: The awful readerhighlight_spec test *relies* on this pointer being left dangling...
+    if not self.ui._testsuite then
+        self.emitHintPageEvent = nil
+    end
 end
 
 function ReaderView:onReaderReady()
@@ -1144,7 +1122,7 @@ function ReaderView:isOverlapAllowed()
     if self.ui.paging then
         return not self.page_scroll
             and (self.ui.paging.zoom_mode ~= "page"
-                or (self.ui.paging.zoom_mode == "page" and self.ui.paging.is_reflowed))
+                or (self.ui.paging.zoom_mode == "page" and self.document.configurable.text_wrap == 1))
             and not self.ui.paging.zoom_mode:find("height")
     else
         return self.view_mode ~= "page"
@@ -1152,11 +1130,7 @@ function ReaderView:isOverlapAllowed()
 end
 
 function ReaderView:setupTouchZones()
-    if self.ui.rolling then
-        self.ui.rolling:setupTouchZones()
-    else
-        self.ui.paging:setupTouchZones()
-    end
+    (self.ui.rolling or self.ui.paging):setupTouchZones()
 end
 
 function ReaderView:onToggleReadingOrder()
@@ -1242,17 +1216,17 @@ function ReaderView:setupNoteMarkPosition()
                 self.note_mark_pos_x1 = screen_w - sign_gap - sign_w
             end
         else
-            local doc_margins = self.ui.document:getPageMargins()
+            local doc_margins = self.document:getPageMargins()
             local pos_x_r = screen_w - doc_margins["right"] + sign_gap -- mark in the right margin
             local pos_x_l = doc_margins["left"] - sign_gap - sign_w -- mark in the left margin
-            if self.ui.document:getVisiblePageCount() == 1 then
+            if self.document:getVisiblePageCount() == 1 then
                 if BD.mirroredUILayout() then
                     self.note_mark_pos_x1 = pos_x_l
                 else
                     self.note_mark_pos_x1 = pos_x_r
                 end
             else -- two-page mode
-                local page2_x = self.ui.document:getPageOffsetX(self.ui.document:getCurrentPage(true)+1)
+                local page2_x = self.document:getPageOffsetX(self.document:getCurrentPage(true)+1)
                 if BD.mirroredUILayout() then
                     self.note_mark_pos_x1 = pos_x_l
                     self.note_mark_pos_x2 = pos_x_l + page2_x
@@ -1263,6 +1237,43 @@ function ReaderView:setupNoteMarkPosition()
             end
         end
     end
+end
+
+function ReaderView:getCurrentPageLineWordCounts()
+    local lines_nb, words_nb = 0, 0
+    if self.ui.rolling then
+        local res = self.document:getTextFromPositions({x = 0, y = 0},
+            {x = Screen:getWidth(), y = Screen:getHeight()}, true) -- do not highlight
+        if res then
+            lines_nb = #self.document:getScreenBoxesFromPositions(res.pos0, res.pos1, true)
+            for word in util.gsplit(res.text, "[%s%p]+", false) do
+                if util.hasCJKChar(word) then
+                    for char in util.gsplit(word, "[\192-\255][\128-\191]+", true) do
+                        words_nb = words_nb + 1
+                    end
+                else
+                    words_nb = words_nb + 1
+                end
+            end
+        end
+    else
+        local page_boxes = self.document:getTextBoxes(self.ui:getCurrentPage())
+        if page_boxes and page_boxes[1][1].word then
+            lines_nb = #page_boxes
+            for _, line in ipairs(page_boxes) do
+                if #line == 1 and line[1].word == "" then -- empty line
+                    lines_nb = lines_nb - 1
+                else
+                    words_nb = words_nb + #line
+                    local last_word = line[#line].word
+                    if last_word:sub(-1) == "-" and last_word ~= "-" then -- hyphenated
+                        words_nb = words_nb - 1
+                    end
+                end
+            end
+        end
+    end
+    return lines_nb, words_nb
 end
 
 return ReaderView

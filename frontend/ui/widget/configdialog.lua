@@ -292,7 +292,7 @@ function ConfigOption:init()
                 local name_text_max_width = name_widget_width
                 local face = Font:getFace(name_font_face, name_font_size)
                 local option_name_container = RightContainer:new{
-                    dimen = Geom:new{ w = name_widget_width, h = option_height},
+                    dimen = Geom:new{ w = name_widget_width, h = option_height },
                 }
                 local option_name = Button:new{
                     text = name_text,
@@ -546,10 +546,12 @@ function ConfigOption:init()
                 local row_count = self.options[c].row_count or 1
                 local toggle_height = Screen:scaleBySize(self.options[c].height
                                                          or (30 * row_count))
+                local toggle = {} -- keep options intact
+                for i = 1, #self.options[c].toggle do
+                    toggle[i] = self.options[c].toggle[i]
+                end
                 if self.options[c].more_options then
-                    table.insert(self.options[c].toggle, "⋮")
-                    table.insert(self.options[c].args, "⋮")
-                    self.options[c].more_options = false
+                    table.insert(toggle, "⋮")
                 end
                 local switch = ToggleSwitch:new{
                     width = math.min(max_toggle_width, toggle_width),
@@ -558,7 +560,7 @@ function ConfigOption:init()
                     font_size = item_font_size,
                     name = self.options[c].name,
                     name_text = name_text,
-                    toggle = self.options[c].toggle,
+                    toggle = toggle,
                     alternate = self.options[c].alternate,
                     values = self.options[c].values,
                     args = self.options[c].args,
@@ -568,7 +570,7 @@ function ConfigOption:init()
                     enabled = enabled,
                     row_count = row_count,
                     callback = function(arg)
-                        if self.options[c].toggle[arg] == "⋮" then
+                        if toggle[arg] == "⋮" then
                             if self.options[c].show_true_value_func and not self.options[c].more_options_param.show_true_value_func then
                                 self.options[c].more_options_param.show_true_value_func = self.options[c].show_true_value_func
                             end
@@ -828,7 +830,7 @@ function MenuBar:init()
     table.insert(menu_bar, spacing)
     table.insert(line_bar, spacing_line)
 
-    self.dimen = Geom:new{ w = Screen:getWidth(), h = bar_height}
+    self.dimen = Geom:new{ x = 0, y = 0, w = Screen:getWidth(), h = bar_height }
     local vertical_menu = VerticalGroup:new{
         line_bar,
         menu_bar,
@@ -897,9 +899,7 @@ function ConfigDialog:init()
     end
 end
 
-function ConfigDialog:updateConfigPanel(index)
-
-end
+function ConfigDialog:updateConfigPanel(index) end
 
 function ConfigDialog:update()
     self:moveFocusTo(1, 1) -- reset selected for re-created layout
@@ -923,7 +923,6 @@ function ConfigDialog:update()
         config_dialog = self,
     }
 
-    local old_dimen = self.dialog_frame and self.dialog_frame.dimen and self.dialog_frame.dimen:copy() or Geom:new{}
     self.dialog_frame = FrameContainer:new{
         background = Blitbuffer.COLOR_WHITE,
         padding_bottom = 0, -- ensured by MenuBar
@@ -932,9 +931,6 @@ function ConfigDialog:update()
             self.config_menubar,
         },
     }
-    -- Ensure we have a sane-ish Geom object *before* paintTo gets called,
-    -- to avoid weirdness in race-y SwipeCloseMenu calls...
-    self.dialog_frame.dimen = old_dimen
 
     -- Reset the focusmanager cursor
     self:moveFocusTo(self.panel_index, #self.layout, FocusManager.NOT_FOCUS)
